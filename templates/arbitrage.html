@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <title>Arbitrage Finder</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+            background: #000;
+            color: #fff;
+            padding-bottom: 100px;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        h1 { font-size: 1.5em; margin-bottom: 5px; }
+        .subtitle { font-size: 0.85em; opacity: 0.9; }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            padding: 15px;
+            background: #111;
+        }
+        .stat {
+            background: #222;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .stat-value {
+            font-size: 2em;
+            font-weight: bold;
+            color: #667eea;
+        }
+        .stat-label {
+            font-size: 0.75em;
+            color: #888;
+            margin-top: 5px;
+        }
+        .controls {
+            padding: 15px;
+            text-align: center;
+        }
+        button {
+            width: 100%;
+            padding: 16px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border: none;
+            border-radius: 8px;
+            color: white;
+            font-size: 1.1em;
+            font-weight: 600;
+        }
+        button:active { transform: scale(0.98); }
+        button:disabled { opacity: 0.5; }
+        .opportunities {
+            padding: 0 15px;
+        }
+        .opp {
+            background: #111;
+            margin: 15px 0;
+            padding: 15px;
+            border-radius: 12px;
+            border-left: 4px solid #667eea;
+        }
+        .opp.high { border-left-color: #ffd700; }
+        .opp.extreme { border-left-color: #ff4757; }
+        .opp-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 10px;
+        }
+        .opp-player {
+            font-size: 1.2em;
+            font-weight: bold;
+        }
+        .opp-edge {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #00d4ff;
+        }
+        .opp-info {
+            font-size: 0.85em;
+            color: #888;
+            margin-bottom: 10px;
+        }
+        .opp-details {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            margin: 10px 0;
+            font-size: 0.85em;
+        }
+        .detail-item {
+            text-align: center;
+        }
+        .detail-label {
+            color: #888;
+            font-size: 0.85em;
+        }
+        .detail-value {
+            font-weight: bold;
+            font-size: 1.1em;
+            margin-top: 3px;
+        }
+        .opp-rec {
+            background: #222;
+            padding: 12px;
+            border-radius: 8px;
+            font-weight: bold;
+            color: #00d4ff;
+            margin-top: 10px;
+        }
+        .badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.75em;
+            font-weight: bold;
+            margin-left: 8px;
+        }
+        .badge-fd { background: #0070f3; }
+        .badge-espn { background: #ff0000; }
+        .loading {
+            text-align: center;
+            padding: 40px;
+        }
+        .spinner {
+            border: 3px solid #333;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .empty {
+            text-align: center;
+            padding: 60px 20px;
+            color: #666;
+        }
+        .empty-icon {
+            font-size: 3em;
+            margin-bottom: 15px;
+        }
+        .status {
+            padding: 10px 15px;
+            background: #111;
+            font-size: 0.85em;
+            color: #888;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🎯 Arbitrage Finder</h1>
+        <div class="subtitle">Premium - Unlimited Scans</div>
+    </div>
+
+    <div class="stats">
+        <div class="stat">
+            <div class="stat-value" id="total">0</div>
+            <div class="stat-label">Found</div>
+        </div>
+        <div class="stat">
+            <div class="stat-value" id="highEV">0</div>
+            <div class="stat-label">High EV</div>
+        </div>
+        <div class="stat">
+            <div class="stat-value" id="extreme">0</div>
+            <div class="stat-label">Extreme</div>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button id="scanBtn" onclick="scan()">🔍 Scan All Markets</button>
+    </div>
+
+    <div class="status" id="status">
+        Ready - Click scan to find opportunities
+    </div>
+
+    <div id="container" class="opportunities">
+        <div class="empty">
+            <div class="empty-icon">📊</div>
+            <div>Click "Scan All Markets" to start</div>
+        </div>
+    </div>
+
+    <script>
+        let scanning = false;
+        let pollInterval;
+
+        async function scan() {
+            if (scanning) return;
+            
+            const btn = document.getElementById('scanBtn');
+            btn.disabled = true;
+            btn.textContent = '⏳ Scanning 7 Markets...';
+            scanning = true;
+
+            document.getElementById('container').innerHTML = `
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <div>Scanning NBA, NFL, NHL markets...</div>
+                    <div style="margin-top: 10px; font-size: 0.85em; color: #666;">This takes 30-60 seconds</div>
+                </div>
+            `;
+
+            try {
+                await fetch('/api/scan', { method: 'POST' });
+                
+                // Poll for results
+                pollInterval = setInterval(checkResults, 2000);
+                
+            } catch (e) {
+                alert('Error: ' + e.message);
+                btn.disabled = false;
+                btn.textContent = '🔍 Scan All Markets';
+                scanning = false;
+            }
+        }
+
+        async function checkResults() {
+            try {
+                const response = await fetch('/api/opportunities');
+                const data = await response.json();
+
+                if (!data.scanning && data.opportunities) {
+                    clearInterval(pollInterval);
+                    displayResults(data);
+                    
+                    const btn = document.getElementById('scanBtn');
+                    btn.disabled = false;
+                    btn.textContent = '🔍 Scan All Markets';
+                    scanning = false;
+                }
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        function displayResults(data) {
+            const opps = data.opportunities || [];
+            
+            // Update stats
+            document.getElementById('total').textContent = opps.length;
+            document.getElementById('highEV').textContent = opps.filter(o => o.edge >= 7).length;
+            document.getElementById('extreme').textContent = opps.filter(o => o.edge >= 10).length;
+
+            // Update status
+            document.getElementById('status').textContent = 
+                `Last scan: ${data.last_scan || 'Never'} - Found ${opps.length} opportunities`;
+
+            const container = document.getElementById('container');
+
+            if (opps.length === 0) {
+                container.innerHTML = `
+                    <div class="empty">
+                        <div class="empty-icon">✅</div>
+                        <div>No outliers found</div>
+                        <p style="margin-top: 10px; font-size: 0.9em;">All lines are fairly priced</p>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = opps.map(opp => {
+                const edgeClass = opp.edge >= 10 ? 'extreme' : opp.edge >= 7 ? 'high' : '';
+                const badgeClass = opp.book === 'FanDuel' ? 'badge-fd' : 'badge-espn';
+                const edgeColor = opp.edge >= 10 ? '#ff4757' : opp.edge >= 7 ? '#ffa502' : '#00d4ff';
+
+                return `
+                    <div class="opp ${edgeClass}">
+                        <div class="opp-header">
+                            <div>
+                                <div class="opp-player">${opp.player}</div>
+                                <span class="badge ${badgeClass}">${opp.book}</span>
+                            </div>
+                            <div class="opp-edge" style="color: ${edgeColor}">${opp.edge}%</div>
+                        </div>
+                        <div class="opp-info">${opp.game}</div>
+                        <div class="opp-details">
+                            <div class="detail-item">
+                                <div class="detail-label">Book Line</div>
+                                <div class="detail-value">${opp.line}</div>
+                            </div>
+                            <div class="detail-item">
+                                <div class="detail-label">Consensus</div>
+                                <div class="detail-value">${opp.consensus}</div>
+                            </div>
+                            <div class="detail-item">
+                                <div class="detail-label">Diff</div>
+                                <div class="detail-value" style="color: ${edgeColor}">${opp.difference > 0 ? '+' : ''}${opp.difference}</div>
+                            </div>
+                        </div>
+                        <div class="opp-rec">
+                            ⚡ BET ${opp.recommendation} ${opp.line} on ${opp.book.toUpperCase()}
+                            <div style="font-size: 0.85em; margin-top: 5px; opacity: 0.8;">Odds: ${opp.odds > 0 ? '+' : ''}${opp.odds}</div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            // Scroll to top
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+
+        // Auto-refresh every 5 minutes
+        setInterval(() => {
+            if (!scanning) {
+                scan();
+            }
+        }, 5 * 60 * 1000);
+    </script>
+</body>
+</html>
