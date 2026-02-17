@@ -1,6 +1,7 @@
 """
 Premium Arbitrage Finder - Web Version
 Runs on Render.com, access from iPhone
+NOW WITH NCAA BASKETBALL!
 """
 
 from flask import Flask, render_template, jsonify
@@ -24,14 +25,24 @@ state = {
     'total_scanned': 0
 }
 
-# Exploitable markets
+# Exploitable markets - NOW WITH NCAA!
 MARKETS = [
+    # NCAA Basketball (MOST EXPLOITABLE - March Madness season!)
+    ('basketball_ncaab', 'player_points', 'NCAAB Points'),
+    ('basketball_ncaab', 'player_rebounds', 'NCAAB Rebounds'),
+    ('basketball_ncaab', 'player_assists', 'NCAAB Assists'),
+    
+    # NBA
     ('basketball_nba', 'player_points', 'NBA Points'),
     ('basketball_nba', 'player_rebounds', 'NBA Rebounds'),
     ('basketball_nba', 'player_assists', 'NBA Assists'),
     ('basketball_nba', 'player_threes', 'NBA 3-Pointers'),
+    
+    # NFL
     ('americanfootball_nfl', 'player_pass_tds', 'NFL Pass TDs'),
     ('americanfootball_nfl', 'player_pass_yds', 'NFL Pass Yards'),
+    
+    # NHL
     ('icehockey_nhl', 'player_points', 'NHL Points'),
 ]
 
@@ -197,3 +208,4 @@ def get_opportunities():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
+
