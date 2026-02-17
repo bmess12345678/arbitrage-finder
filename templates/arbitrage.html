@@ -34,7 +34,7 @@
             text-align: center;
         }
         .stat-value { font-size: 1.8em; font-weight: bold; color: #667eea; }
-        .stat-label { font-size: 0.75em; color: #999; margin-top: 5px; }
+        .stat-label { font-size: 0.7em; color: #999; margin-top: 5px; }
 
         .controls { padding: 0 15px 15px; }
         .scan-btn {
@@ -52,42 +52,35 @@
         .scan-btn:active { transform: scale(0.98); }
         .scan-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-        .status {
-            padding: 5px 15px 10px;
-            font-size: 0.8em;
-            color: #888;
-        }
+        .status { padding: 5px 15px 10px; font-size: 0.8em; color: #888; }
 
-        /* Debug log */
-        .debug-toggle {
-            padding: 0 15px 10px;
-        }
+        .debug-toggle { padding: 0 15px 10px; }
         .debug-toggle button {
-            background: #16213e;
-            border: 1px solid #333;
-            color: #888;
-            padding: 6px 12px;
-            border-radius: 6px;
-            font-size: 0.75em;
-            cursor: pointer;
+            background: #16213e; border: 1px solid #333; color: #888;
+            padding: 6px 12px; border-radius: 6px; font-size: 0.75em; cursor: pointer;
         }
         .debug-log {
             display: none;
-            background: #0d1117;
-            border: 1px solid #333;
-            border-radius: 8px;
-            margin: 0 15px 15px;
-            padding: 12px;
-            max-height: 300px;
-            overflow-y: auto;
+            background: #0d1117; border: 1px solid #333; border-radius: 8px;
+            margin: 0 15px 15px; padding: 12px;
+            max-height: 300px; overflow-y: auto;
             font-family: 'SF Mono', Monaco, monospace;
-            font-size: 0.7em;
-            line-height: 1.6;
-            color: #8b949e;
+            font-size: 0.7em; line-height: 1.6; color: #8b949e;
         }
         .debug-log.show { display: block; }
 
-        /* Opportunity cards */
+        /* Filters */
+        .filters {
+            display: flex; gap: 8px; padding: 0 15px 12px; overflow-x: auto;
+        }
+        .filter-btn {
+            padding: 6px 14px; border-radius: 20px; border: 1px solid #333;
+            background: transparent; color: #999; font-size: 0.75em;
+            cursor: pointer; white-space: nowrap;
+        }
+        .filter-btn.active { background: #667eea; border-color: #667eea; color: #fff; }
+
+        /* Cards */
         .opportunities { padding: 0 15px 30px; }
 
         .opp {
@@ -95,205 +88,135 @@
             margin-bottom: 12px;
             border-radius: 12px;
             overflow: hidden;
-            border-left: 4px solid #667eea;
+            border-left: 4px solid #48bb78;
         }
-        .opp.high { border-left-color: #ffa502; }
-        .opp.extreme { border-left-color: #ff4757; }
+        .opp.strong { border-left-color: #ffa502; }
+        .opp.elite { border-left-color: #ff4757; }
 
         .opp-top {
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-            padding: 15px 15px 0;
+            display: flex; justify-content: space-between;
+            align-items: flex-start; padding: 15px 15px 0;
         }
-        .opp-player {
-            font-size: 1.1em;
-            font-weight: 700;
-            color: #fff;
-            margin-bottom: 4px;
-        }
-        .opp-game {
-            font-size: 0.8em;
-            color: #8899aa;
-            margin-bottom: 2px;
+        .opp-player { font-size: 1.1em; font-weight: 700; color: #fff; }
+        .opp-game { font-size: 0.8em; color: #8899aa; margin-top: 2px; }
+
+        .opp-edge-box {
+            text-align: right; flex-shrink: 0; margin-left: 12px;
         }
         .opp-edge {
-            font-size: 1.6em;
-            font-weight: 800;
-            text-align: right;
-            line-height: 1;
+            font-size: 1.5em; font-weight: 800; line-height: 1;
         }
-        .opp-edge .edge-label {
-            font-size: 0.4em;
-            font-weight: 400;
-            color: #888;
-            display: block;
-            margin-top: 2px;
+        .opp-edge-label {
+            font-size: 0.6em; font-weight: 400; color: #888; margin-top: 2px;
+        }
+        .opp-gross {
+            font-size: 0.75em; font-weight: 600; color: #667eea; margin-top: 4px;
         }
 
-        /* Badges */
         .badges { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
         .badge {
-            display: inline-block;
-            padding: 2px 8px;
-            border-radius: 4px;
-            font-size: 0.7em;
-            font-weight: 600;
+            display: inline-block; padding: 2px 8px; border-radius: 4px;
+            font-size: 0.7em; font-weight: 600;
         }
         .badge-fd { background: #1a73e8; color: #fff; }
         .badge-espn { background: #cc0000; color: #fff; }
         .badge-market { background: #2d3748; color: #a0aec0; }
-        .badge-bet { background: #1a472a; color: #48bb78; }
-        .badge-fade { background: #4a1a1a; color: #fc8181; }
 
         /* Data grid */
         .opp-data {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 1px;
-            background: #0d1530;
-            margin: 12px 15px;
-            border-radius: 8px;
-            overflow: hidden;
+            display: grid; grid-template-columns: repeat(3, 1fr);
+            gap: 1px; background: #0d1530;
+            margin: 12px 15px; border-radius: 8px; overflow: hidden;
         }
-        .data-cell {
-            background: #1a2744;
-            padding: 10px 8px;
-            text-align: center;
-        }
+        .data-cell { background: #1a2744; padding: 10px 8px; text-align: center; }
         .data-label {
-            font-size: 0.65em;
-            color: #667eea;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            margin-bottom: 4px;
+            font-size: 0.6em; color: #667eea; text-transform: uppercase;
+            letter-spacing: 0.5px; margin-bottom: 4px;
         }
-        .data-value {
-            font-size: 1.05em;
-            font-weight: 700;
-            color: #fff;
-        }
+        .data-value { font-size: 1.05em; font-weight: 700; color: #fff; }
 
-        /* Probability bar (for game markets) */
-        .prob-bar {
-            margin: 0 15px;
-            padding: 0 0 4px;
+        /* Fair value bar (game markets) */
+        .fair-bar { margin: 0 15px; padding: 0 0 4px; }
+        .fair-bar-labels {
+            font-size: 0.7em; color: #888; display: flex;
+            justify-content: space-between; margin-bottom: 4px;
         }
-        .prob-bar-label {
-            font-size: 0.7em;
-            color: #888;
-            margin-bottom: 4px;
-            display: flex;
-            justify-content: space-between;
+        .fair-bar-track {
+            height: 8px; background: #0d1530; border-radius: 4px;
+            overflow: hidden; position: relative;
         }
-        .prob-bar-track {
-            height: 6px;
-            background: #0d1530;
-            border-radius: 3px;
-            overflow: hidden;
-            position: relative;
+        .fair-bar-fill {
+            height: 100%; border-radius: 4px; background: #48bb78; opacity: 0.5;
         }
-        .prob-bar-fill {
-            height: 100%;
-            border-radius: 3px;
+        .fair-bar-marker {
+            position: absolute; top: -1px; width: 3px; height: 10px;
+            background: #fff; border-radius: 1px; transform: translateX(-50%);
         }
-        .prob-bar-marker {
-            position: absolute;
-            top: -2px;
-            width: 3px;
-            height: 10px;
-            background: #fff;
-            border-radius: 1px;
-            transform: translateX(-50%);
+        .fair-bar-edge-label {
+            font-size: 0.7em; color: #48bb78; text-align: center; margin-top: 4px;
         }
 
         /* Recommendation */
         .opp-rec {
             padding: 10px 15px 12px;
-            font-size: 0.85em;
-            font-weight: 600;
+            font-size: 0.9em; font-weight: 600; color: #48bb78;
         }
-        .opp-rec.bet { color: #48bb78; }
-        .opp-rec.fade { color: #fc8181; }
-        .opp-rec .rec-odds {
-            font-size: 0.85em;
-            font-weight: 400;
-            opacity: 0.7;
-            margin-top: 2px;
+        .opp-rec .rec-sub {
+            font-size: 0.8em; font-weight: 400; color: #8899aa; margin-top: 2px;
         }
 
-        /* Empty state */
         .empty {
-            text-align: center;
-            padding: 60px 20px;
-            color: #666;
+            text-align: center; padding: 60px 20px; color: #666;
         }
         .empty .icon { font-size: 3em; margin-bottom: 15px; }
 
-        /* Filter tabs */
-        .filters {
-            display: flex;
-            gap: 8px;
-            padding: 0 15px 12px;
-            overflow-x: auto;
+        /* Explainer */
+        .explainer {
+            margin: 0 15px 15px; padding: 12px 15px;
+            background: #1a2744; border-radius: 8px;
+            font-size: 0.75em; color: #8899aa; line-height: 1.5;
         }
-        .filter-btn {
-            padding: 6px 14px;
-            border-radius: 20px;
-            border: 1px solid #333;
-            background: transparent;
-            color: #999;
-            font-size: 0.75em;
-            cursor: pointer;
-            white-space: nowrap;
-        }
-        .filter-btn.active {
-            background: #667eea;
-            border-color: #667eea;
-            color: #fff;
-        }
+        .explainer strong { color: #a0aec0; }
     </style>
 </head>
 <body>
 
     <div class="header">
         <h1>🎯 Arbitrage Finder</h1>
-        <div class="sub">Premium · Unlimited Scans</div>
+        <div class="sub">Only showing +EV bets after juice</div>
     </div>
 
     <div class="stats">
         <div class="stat-card">
             <div class="stat-value" id="totalFound">0</div>
-            <div class="stat-label">Found</div>
+            <div class="stat-label">Bets Found</div>
         </div>
         <div class="stat-card">
-            <div class="stat-value" id="totalHigh">0</div>
-            <div class="stat-label">High EV</div>
+            <div class="stat-value" id="totalStrong">0</div>
+            <div class="stat-label">Strong (4%+)</div>
         </div>
         <div class="stat-card">
-            <div class="stat-value" id="totalExtreme">0</div>
-            <div class="stat-label">Extreme</div>
+            <div class="stat-value" id="totalElite">0</div>
+            <div class="stat-label">Elite (6%+)</div>
         </div>
     </div>
 
     <div class="controls">
-        <button class="scan-btn" id="scanBtn" onclick="scan()">
-            🔍 Scan All Markets
-        </button>
+        <button class="scan-btn" id="scanBtn" onclick="scan()">🔍 Scan All Markets</button>
     </div>
 
-    <div class="status" id="statusText">Ready — Click scan to find opportunities</div>
+    <div class="status" id="statusText">Ready — Click scan to find +EV opportunities</div>
 
     <div class="debug-toggle">
-        <button onclick="toggleDebug()">📋 Toggle Debug Log</button>
+        <button onclick="toggleDebug()">📋 Debug Log</button>
     </div>
     <div class="debug-log" id="debugLog"></div>
 
     <div class="filters" id="filters" style="display:none;">
         <button class="filter-btn active" onclick="setFilter('all', this)">All</button>
         <button class="filter-btn" onclick="setFilter('player_prop', this)">Player Props</button>
-        <button class="filter-btn" onclick="setFilter('game_market', this)">Game Markets</button>
-        <button class="filter-btn" onclick="setFilter('bet', this)">BET Only</button>
+        <button class="filter-btn" onclick="setFilter('game_market', this)">Game Lines</button>
+        <button class="filter-btn" onclick="setFilter('strong', this)">Strong 4%+</button>
     </div>
 
     <div class="opportunities" id="oppContainer">
@@ -302,6 +225,14 @@
             <div>No opportunities yet</div>
             <div style="margin-top:8px; font-size:0.9em;">Hit scan to search all markets</div>
         </div>
+    </div>
+
+    <div class="explainer" id="explainer" style="display:none;">
+        <strong>How edges are calculated:</strong> Sharp books (DraftKings, BetMGM, Caesars)
+        are devigged to find true fair odds. <strong>Gross</strong> = pricing difference before juice
+        (sharp fair vs target devigged). <strong>Net</strong> = what you capture after the vig
+        (sharp fair vs target's juiced odds). Any positive net edge is +EV long-term.
+        A +3% net edge ≈ $3 profit per $100 wagered. The book's actual vig is shown on each card.
     </div>
 
     <script>
@@ -323,22 +254,18 @@
         async function scan() {
             if (scanning) return;
             scanning = true;
-
             const btn = document.getElementById('scanBtn');
             btn.disabled = true;
             btn.textContent = '⏳ Scanning...';
-            document.getElementById('statusText').textContent = 'Scanning markets... this takes 30-90 seconds';
+            document.getElementById('statusText').textContent = 'Scanning & devigging lines... 30-90 sec';
 
             try {
                 await fetch('/api/scan', { method: 'POST' });
-
-                // Poll for results
                 const poll = setInterval(async () => {
                     try {
                         const resp = await fetch('/api/opportunities');
                         const data = await resp.json();
 
-                        // Update debug log
                         if (data.debug && data.debug.length > 0) {
                             document.getElementById('debugLog').innerHTML =
                                 data.debug.map(d => `<div>${d}</div>`).join('');
@@ -349,97 +276,96 @@
                             scanning = false;
                             btn.disabled = false;
                             btn.textContent = '🔍 Scan All Markets';
-
                             allOpps = data.opportunities || [];
 
-                            const high = allOpps.filter(o => o.edge >= 5).length;
-                            const extreme = allOpps.filter(o => o.edge >= 8).length;
-
                             document.getElementById('totalFound').textContent = allOpps.length;
-                            document.getElementById('totalHigh').textContent = high;
-                            document.getElementById('totalExtreme').textContent = extreme;
-
+                            document.getElementById('totalStrong').textContent =
+                                allOpps.filter(o => o.edge >= 4).length;
+                            document.getElementById('totalElite').textContent =
+                                allOpps.filter(o => o.edge >= 6).length;
                             document.getElementById('statusText').textContent =
-                                `Last scan: ${data.last_scan} · Found ${allOpps.length} opportunities`;
-
-                            // Show filters if we have results
+                                `Last scan: ${data.last_scan} · ${allOpps.length} +EV bets found`;
                             document.getElementById('filters').style.display =
                                 allOpps.length > 0 ? 'flex' : 'none';
-
+                            document.getElementById('explainer').style.display =
+                                allOpps.length > 0 ? 'block' : 'none';
                             renderOpps();
                         }
-                    } catch (e) {
-                        // keep polling
-                    }
+                    } catch (e) { /* keep polling */ }
                 }, 2000);
             } catch (e) {
                 scanning = false;
                 btn.disabled = false;
                 btn.textContent = '🔍 Scan All Markets';
-                document.getElementById('statusText').textContent = 'Error starting scan. Try again.';
+                document.getElementById('statusText').textContent = 'Error. Try again.';
             }
         }
 
         function renderOpps() {
             const container = document.getElementById('oppContainer');
-
             let opps = allOpps;
-            if (currentFilter === 'player_prop') {
+
+            if (currentFilter === 'player_prop')
                 opps = allOpps.filter(o => o.type === 'player_prop');
-            } else if (currentFilter === 'game_market') {
+            else if (currentFilter === 'game_market')
                 opps = allOpps.filter(o => o.type === 'game_market');
-            } else if (currentFilter === 'bet') {
-                opps = allOpps.filter(o => !o.recommendation.startsWith('FADE'));
-            }
+            else if (currentFilter === 'strong')
+                opps = allOpps.filter(o => o.edge >= 4);
 
             if (opps.length === 0) {
                 container.innerHTML = `
                     <div class="empty">
                         <div class="icon">✅</div>
-                        <div>No outliers found</div>
-                        <div style="margin-top:8px; font-size:0.9em;">All lines are fairly priced right now</div>
-                    </div>
-                `;
+                        <div>No +EV opportunities right now</div>
+                        <div style="margin-top:8px; font-size:0.9em;">
+                            All lines are fairly priced after accounting for juice
+                        </div>
+                    </div>`;
                 return;
             }
 
             container.innerHTML = opps.map(opp => {
-                const edgeClass = opp.edge >= 8 ? 'extreme' : opp.edge >= 5 ? 'high' : '';
-                const edgeColor = opp.edge >= 8 ? '#ff4757' : opp.edge >= 5 ? '#ffa502' : '#00d4ff';
+                const cls = opp.edge >= 6 ? 'elite' : opp.edge >= 4 ? 'strong' : '';
+                const color = opp.edge >= 6 ? '#ff4757' : opp.edge >= 4 ? '#ffa502' : '#48bb78';
                 const bookBadge = opp.book === 'FanDuel' ? 'badge-fd' : 'badge-espn';
-                const isBet = opp.recommendation && !opp.recommendation.startsWith('FADE');
-                const recClass = isBet ? 'bet' : 'fade';
-                const recBadge = isBet ? 'badge-bet' : 'badge-fade';
-                const recIcon = isBet ? '⚡' : '⚠️';
 
-                // Edge label
-                let edgeLabel = 'line edge';
-                if (opp.type === 'game_market') {
-                    edgeLabel = 'prob edge';
+                // Gross edge display (if available, otherwise same as net)
+                const grossEdge = opp.gross_edge !== undefined ? opp.gross_edge : opp.edge;
+                const grossHtml = grossEdge !== opp.edge
+                    ? `<div class="opp-gross">Gross: +${grossEdge}%</div>`
+                    : '';
+
+                // Fair value bar for game markets AND same-line props
+                let fairBarHtml = '';
+                if (opp.target_prob && opp.fair_prob) {
+                    const tp = opp.target_prob;
+                    const fp = opp.fair_prob;
+                    fairBarHtml = `
+                        <div class="fair-bar">
+                            <div class="fair-bar-labels">
+                                <span>${opp.book} implies: ${tp}%</span>
+                                <span>Fair: ${fp}%</span>
+                            </div>
+                            <div class="fair-bar-track">
+                                <div class="fair-bar-fill" style="width:${fp}%;"></div>
+                                <div class="fair-bar-marker" style="left:${tp}%;"
+                                     title="${opp.book} implied: ${tp}%"></div>
+                            </div>
+                            <div class="fair-bar-edge-label">
+                                ${opp.book} is underpricing this by ${opp.edge}%
+                            </div>
+                        </div>`;
                 }
 
-                // Build probability bar for game markets
-                let probBarHtml = '';
-                if (opp.type === 'game_market' && opp.target_prob && opp.consensus_prob) {
-                    const tp = opp.target_prob;
-                    const cp = opp.consensus_prob;
-                    const barColor = isBet ? '#48bb78' : '#fc8181';
-                    probBarHtml = `
-                        <div class="prob-bar">
-                            <div class="prob-bar-label">
-                                <span>${opp.book}: ${tp}%</span>
-                                <span>Consensus: ${cp}%</span>
-                            </div>
-                            <div class="prob-bar-track">
-                                <div class="prob-bar-fill" style="width:${tp}%; background:${barColor}; opacity:0.4;"></div>
-                                <div class="prob-bar-marker" style="left:${cp}%;"></div>
-                            </div>
-                        </div>
-                    `;
+                // Show actual juice if available
+                let juiceHtml = '';
+                if (opp.juice_display) {
+                    juiceHtml = `<span style="color:#888; font-size:0.75em;"> · Vig: ${opp.juice_display}</span>`;
+                }
                 }
 
                 return `
-                    <div class="opp ${edgeClass}">
+                    <div class="opp ${cls}">
                         <div class="opp-top">
                             <div>
                                 <div class="opp-player">${opp.player}</div>
@@ -447,45 +373,42 @@
                                 <div class="badges">
                                     <span class="badge ${bookBadge}">${opp.book}</span>
                                     <span class="badge badge-market">${opp.market || ''}</span>
-                                    <span class="badge ${recBadge}">${isBet ? 'VALUE' : 'AVOID'}</span>
                                 </div>
                             </div>
-                            <div class="opp-edge" style="color:${edgeColor}">
-                                ${opp.edge}%
-                                <span class="edge-label">${edgeLabel}</span>
+                            <div class="opp-edge-box">
+                                ${grossHtml}
+                                <div class="opp-edge" style="color:${color}">+${opp.edge}%</div>
+                                <div class="opp-edge-label">net of vig</div>
                             </div>
                         </div>
 
                         <div class="opp-data">
                             <div class="data-cell">
-                                <div class="data-label">${opp.label1_name || 'Book'}</div>
+                                <div class="data-label">${opp.label1_name || ''}</div>
                                 <div class="data-value">${opp.label1_value || '—'}</div>
                             </div>
                             <div class="data-cell">
-                                <div class="data-label">${opp.label2_name || 'Consensus'}</div>
+                                <div class="data-label">${opp.label2_name || ''}</div>
                                 <div class="data-value">${opp.label2_value || '—'}</div>
                             </div>
                             <div class="data-cell">
-                                <div class="data-label">${opp.label3_name || 'Edge'}</div>
-                                <div class="data-value" style="color:${edgeColor}">${opp.label3_value || '—'}</div>
+                                <div class="data-label">${opp.label3_name || ''}</div>
+                                <div class="data-value" style="color:${color}">${opp.label3_value || '—'}</div>
                             </div>
                         </div>
 
-                        ${probBarHtml}
+                        ${fairBarHtml}
 
-                        <div class="opp-rec ${recClass}">
-                            ${recIcon} ${opp.recommendation}
-                            <div class="rec-odds">Odds: ${opp.odds > 0 ? '+' : ''}${opp.odds}</div>
+                        <div class="opp-rec">
+                            ⚡ ${opp.recommendation}
+                            <div class="rec-sub">Odds: ${opp.odds > 0 ? '+' : ''}${opp.odds}${juiceHtml}</div>
                         </div>
-                    </div>
-                `;
+                    </div>`;
             }).join('');
         }
 
         // Auto-refresh every 5 minutes
-        setInterval(() => {
-            if (!scanning) scan();
-        }, 5 * 60 * 1000);
+        setInterval(() => { if (!scanning) scan(); }, 5 * 60 * 1000);
     </script>
 </body>
 </html>
