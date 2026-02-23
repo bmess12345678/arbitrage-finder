@@ -1,7 +1,7 @@
 """
 Premium Arbitrage Finder - Web Version
-Properly devigs sharp books to find true +EV edges after juice.
-Only shows actionable BET opportunities.
+Properly devigs sharp books. Shows any +EV bet after juice.
+Shows gross and net edge. Comprehensive near-miss logging.
 """
 
 from flask import Flask, render_template, jsonify
@@ -26,22 +26,31 @@ state = {
 # MARKETS
 # ============================================================
 
+# Player props via bulk /odds endpoint
 PLAYER_PROP_MARKETS = [
     ('basketball_nba', 'player_points', 'NBA Points'),
     ('basketball_nba', 'player_rebounds', 'NBA Rebounds'),
     ('basketball_nba', 'player_assists', 'NBA Assists'),
-    ('basketball_nba', 'player_threes', 'NBA 3-Pointers'),
+    ('basketball_nba', 'player_threes', 'NBA Threes'),
     ('americanfootball_nfl', 'player_pass_tds', 'NFL Pass TDs'),
     ('americanfootball_nfl', 'player_pass_yds', 'NFL Pass Yards'),
     ('icehockey_nhl', 'player_points', 'NHL Points'),
 ]
 
+# Game markets via bulk /odds endpoint (all sports)
 GAME_LEVEL_MARKETS = [
     ('basketball_ncaab', 'spreads', 'NCAAB Spreads'),
     ('basketball_ncaab', 'totals', 'NCAAB Totals'),
     ('basketball_ncaab', 'h2h', 'NCAAB Moneyline'),
+    ('basketball_nba', 'spreads', 'NBA Spreads'),
+    ('basketball_nba', 'totals', 'NBA Totals'),
+    ('basketball_nba', 'h2h', 'NBA Moneyline'),
+    ('icehockey_nhl', 'spreads', 'NHL Puckline'),
+    ('icehockey_nhl', 'totals', 'NHL Totals'),
+    ('icehockey_nhl', 'h2h', 'NHL Moneyline'),
 ]
 
+# NCAA player props fetched event-by-event
 NCAAB_PROP_MARKETS = [
     ('player_points', 'NCAAB Points'),
     ('player_rebounds', 'NCAAB Rebounds'),
@@ -56,8 +65,8 @@ BOOK_DISPLAY = {
     'draftkings': 'DraftKings', 'betmgm': 'BetMGM', 'williamhill_us': 'Caesars'
 }
 
-# Minimum NET edge (after juice) to display — show anything profitable
-MIN_EDGE_NET = 0.1  # Show any bet with >0.1% net edge (effectively any +EV bet)
+# Show any bet with positive net edge
+MIN_EDGE_NET = 0.1
 
 
 def log_debug(msg):
@@ -71,31 +80,22 @@ def log_debug(msg):
 # ============================================================
 
 def american_to_implied(odds):
-    """American odds -> implied probability (0 to 1)"""
     if odds >= 0:
         return 100.0 / (odds + 100.0)
     else:
         return abs(odds) / (abs(odds) + 100.0)
 
-
 def devig_pair(prob_a, prob_b):
-    """
-    Remove vig from a pair of implied probabilities.
-    Returns (fair_a, fair_b) that sum to 1.0.
-    """
     total = prob_a + prob_b
     if total <= 0:
         return (0.5, 0.5)
     return (prob_a / total, prob_b / total)
 
-
 def format_american(odds):
     rounded = int(round(odds))
     return f"+{rounded}" if rounded > 0 else str(rounded)
 
-
 def implied_to_american(prob):
-    """Convert implied probability back to American odds (for display)"""
     if prob <= 0 or prob >= 1:
         return 0
     if prob >= 0.5:
@@ -127,7 +127,6 @@ def fetch_odds(sport, market):
         log_debug(f"  {sport}/{market}: Error - {str(e)[:80]}")
     return None
 
-
 def fetch_ncaab_events():
     url = f"https://api.the-odds-api.com/v4/sports/basketball_ncaab/events"
     params = {'apiKey': API_KEY}
@@ -142,7 +141,6 @@ def fetch_ncaab_events():
     except Exception as e:
         log_debug(f"  NCAAB events: Error - {str(e)[:80]}")
     return []
-
 
 def fetch_event_odds(event_id, market):
     url = f"https://api.the-odds-api.com/v4/sports/basketball_ncaab/events/{event_id}/odds"
@@ -160,34 +158,25 @@ def fetch_event_odds(event_id, market):
 
 
 # ============================================================
-# PLAYER PROP ANALYSIS (devigged — no estimated juice)
+# PLAYER PROP ANALYSIS
+#
+# Strategy: Try devig (both sides) first for accurate net edge.
+# Fall back to line-comparison for players missing one side.
 # ============================================================
 
 def analyze_player_props(games_data, market_name=""):
-    """
-    Two scenarios for player props:
-
-    A) SAME LINE across books: Devig sharp books' Over/Under to get fair
-       probability. Compare target's juiced implied prob. Edge = fair - implied.
-       Already net of juice (same method as game markets).
-
-    B) DIFFERENT LINE on target vs sharp: Use line difference as raw edge,
-       then subtract the target book's ACTUAL per-side juice (calculated
-       from their own Over + Under implied probs).
-
-    Only shows actionable BET opportunities (positive net edge).
-    """
     if not games_data:
         return []
 
     opportunities = []
+    near_misses = []
+    stats = {'players': 0, 'with_sharp': 0, 'with_target': 0, 'devigged': 0, 'line_compared': 0}
 
     for game in games_data:
         game_info = f"{game.get('away_team', '?')} @ {game.get('home_team', '?')}"
 
-        # Collect: {player: {book: {line: X, over_odds: Y, under_odds: Z}}}
+        # Collect player data: {player: {book: {line, over_odds, under_odds}}}
         players = {}
-
         for bookmaker in game.get('bookmakers', []):
             book_name = bookmaker['key']
             for market in bookmaker.get('markets', []):
@@ -197,8 +186,8 @@ def analyze_player_props(games_data, market_name=""):
                         continue
                     line = outcome.get('point')
                     odds = outcome.get('price')
-                    side = outcome.get('name', '').lower()  # "Over" or "Under"
-                    if line is None or odds is None or not side:
+                    side = outcome.get('name', '').lower()
+                    if line is None or odds is None:
                         continue
 
                     if player not in players:
@@ -210,284 +199,309 @@ def analyze_player_props(games_data, market_name=""):
                         players[player]['books'][book_name]['over_odds'] = odds
                     elif 'under' in side:
                         players[player]['books'][book_name]['under_odds'] = odds
-                    # Update line (should be same for over/under)
                     players[player]['books'][book_name]['line'] = line
 
-        # Analyze each player
         for player, data in players.items():
+            stats['players'] += 1
             books = data['books']
 
-            # Get sharp books that have both sides
-            sharp_with_both = []
-            for sb in SHARP_BOOKS:
-                if sb in books and 'over_odds' in books[sb] and 'under_odds' in books[sb]:
-                    sharp_with_both.append(sb)
-            if len(sharp_with_both) < 2:
+            # Sharp books with at least a line
+            sharp_available = [sb for sb in SHARP_BOOKS if sb in books]
+            if len(sharp_available) < 2:
                 continue
+            stats['with_sharp'] += 1
 
-            # Devig sharp books to get fair Over probability at their line
-            sharp_fair_overs = []
-            sharp_lines = []
-            for sb in sharp_with_both:
-                bk = books[sb]
-                over_imp = american_to_implied(bk['over_odds'])
-                under_imp = american_to_implied(bk['under_odds'])
-                fair_over, fair_under = devig_pair(over_imp, under_imp)
-                sharp_fair_overs.append(fair_over)
-                sharp_lines.append(bk['line'])
+            # Target books available
+            targets_available = [tb for tb in TARGET_BOOKS if tb in books]
+            if not targets_available:
+                continue
+            stats['with_target'] += 1
 
-            consensus_fair_over = sum(sharp_fair_overs) / len(sharp_fair_overs)
-            consensus_line = sum(sharp_lines) / len(sharp_lines)
+            # Try DEVIG approach: sharp books with both sides
+            sharp_with_both = [sb for sb in sharp_available
+                               if 'over_odds' in books[sb] and 'under_odds' in books[sb]]
 
-            # Check each target book
-            for target in TARGET_BOOKS:
-                if target not in books:
-                    continue
+            for target in targets_available:
                 tb = books[target]
-                if 'over_odds' not in tb or 'under_odds' not in tb:
-                    continue
-
                 t_line = tb['line']
-                t_over_odds = tb['over_odds']
-                t_under_odds = tb['under_odds']
-                t_over_imp = american_to_implied(t_over_odds)
-                t_under_imp = american_to_implied(t_under_odds)
+                has_both_sides = 'over_odds' in tb and 'under_odds' in tb
 
-                # Calculate target book's actual juice
-                t_total_imp = t_over_imp + t_under_imp
-                t_juice_pct = (t_total_imp - 1.0) * 100  # total overround
-                t_juice_per_side = t_juice_pct / 2.0
+                if len(sharp_with_both) >= 2 and has_both_sides:
+                    # === FULL DEVIG (both sides available) ===
+                    stats['devigged'] += 1
 
-                same_line = abs(t_line - consensus_line) < 0.25
+                    # Devig each sharp book
+                    sharp_fair_overs = []
+                    sharp_lines = []
+                    for sb in sharp_with_both:
+                        bk = books[sb]
+                        ov = american_to_implied(bk['over_odds'])
+                        un = american_to_implied(bk['under_odds'])
+                        fo, fu = devig_pair(ov, un)
+                        sharp_fair_overs.append(fo)
+                        sharp_lines.append(bk['line'])
 
-                if same_line:
-                    # === SCENARIO A: Same line — full devig comparison ===
-                    # Devig target book to get their fair prob (gross edge)
+                    consensus_fair_over = sum(sharp_fair_overs) / len(sharp_fair_overs)
+                    consensus_line = sum(sharp_lines) / len(sharp_lines)
+
+                    t_over_imp = american_to_implied(tb['over_odds'])
+                    t_under_imp = american_to_implied(tb['under_odds'])
+                    t_juice_pct = round((t_over_imp + t_under_imp - 1.0) * 100, 1)
+
+                    # Devig target for gross edge
                     t_fair_over, t_fair_under = devig_pair(t_over_imp, t_under_imp)
 
-                    for side, target_p, odds in [
-                        ('OVER', t_over_imp, t_over_odds),
-                        ('UNDER', t_under_imp, t_under_odds)
-                    ]:
-                        fair_p = consensus_fair_over if side == 'OVER' else (1.0 - consensus_fair_over)
-                        t_fair_p = t_fair_over if side == 'OVER' else t_fair_under
+                    same_line = abs(t_line - consensus_line) < 0.25
 
-                        # Net edge: fair vs juiced implied (what you actually capture)
-                        net_edge = (fair_p - target_p) * 100
-                        # Gross edge: fair vs devigged target (pure pricing diff)
-                        gross_edge = (fair_p - t_fair_p) * 100
+                    if same_line:
+                        # Same line: compare probabilities directly
+                        for side, target_p, t_fair_p, fair_p, odds in [
+                            ('OVER', t_over_imp, t_fair_over, consensus_fair_over, tb['over_odds']),
+                            ('UNDER', t_under_imp, t_fair_under, 1.0 - consensus_fair_over, tb['under_odds']),
+                        ]:
+                            net_edge = (fair_p - target_p) * 100
+                            gross_edge = (fair_p - t_fair_p) * 100
 
-                        if net_edge < MIN_EDGE_NET:
-                            continue
+                            if net_edge >= MIN_EDGE_NET:
+                                fair_odds = implied_to_american(fair_p)
+                                opportunities.append({
+                                    'player': player, 'game': data['game'],
+                                    'market': market_name,
+                                    'book': BOOK_DISPLAY.get(target, target),
+                                    'type': 'player_prop',
+                                    'edge': round(net_edge, 1),
+                                    'gross_edge': round(gross_edge, 1),
+                                    'recommendation': f"{side} {t_line}",
+                                    'odds': odds,
+                                    'label1_name': f'{BOOK_DISPLAY.get(target, target)} Odds',
+                                    'label1_value': format_american(odds),
+                                    'label2_name': 'Fair Odds (no vig)',
+                                    'label2_value': format_american(fair_odds),
+                                    'label3_name': 'Net Edge',
+                                    'label3_value': f"+{net_edge:.1f}%",
+                                    'target_prob': round(target_p * 100, 1),
+                                    'fair_prob': round(fair_p * 100, 1),
+                                    'juice_display': f"{t_juice_pct}%",
+                                })
+                            elif net_edge > -3:
+                                near_misses.append((round(net_edge, 1), player,
+                                    BOOK_DISPLAY.get(target, target), side, t_line))
+                    else:
+                        # Different line: use line diff minus actual juice
+                        diff = t_line - consensus_line
+                        line_edge = abs(diff / consensus_line * 100) if consensus_line != 0 else 0
+                        net_edge = line_edge - (t_juice_pct / 2.0)
 
-                        fair_odds = implied_to_american(fair_p)
+                        if net_edge >= MIN_EDGE_NET and abs(diff) >= 0.5:
+                            side = 'UNDER' if diff > 0 else 'OVER'
+                            odds = tb.get('under_odds' if diff > 0 else 'over_odds', 0)
+                            opportunities.append({
+                                'player': player, 'game': data['game'],
+                                'market': market_name,
+                                'book': BOOK_DISPLAY.get(target, target),
+                                'type': 'player_prop',
+                                'edge': round(net_edge, 1),
+                                'gross_edge': round(line_edge, 1),
+                                'recommendation': f"{side} {t_line}",
+                                'odds': odds,
+                                'label1_name': f'{BOOK_DISPLAY.get(target, target)} Line',
+                                'label1_value': str(t_line),
+                                'label2_name': 'Sharp Consensus',
+                                'label2_value': str(round(consensus_line, 1)),
+                                'label3_name': 'Net Edge',
+                                'label3_value': f"+{net_edge:.1f}%",
+                                'juice_display': f"{t_juice_pct}%",
+                            })
+                        elif net_edge > -3 and abs(diff) >= 0.5:
+                            side = 'UNDER' if diff > 0 else 'OVER'
+                            near_misses.append((round(net_edge, 1), player,
+                                BOOK_DISPLAY.get(target, target), side, t_line))
+
+                else:
+                    # === FALLBACK: Line comparison only ===
+                    # Use when we don't have both sides from enough books
+                    stats['line_compared'] += 1
+
+                    consensus_lines = [books[sb]['line'] for sb in sharp_available]
+                    consensus = sum(consensus_lines) / len(consensus_lines)
+
+                    diff = t_line - consensus
+                    if abs(diff) < 0.5:
+                        continue
+
+                    line_edge = abs(diff / consensus * 100) if consensus != 0 else 0
+
+                    # Estimate juice from available data
+                    if has_both_sides:
+                        t_over_imp = american_to_implied(tb['over_odds'])
+                        t_under_imp = american_to_implied(tb['under_odds'])
+                        t_juice_pct = round((t_over_imp + t_under_imp - 1.0) * 100, 1)
+                    else:
+                        t_juice_pct = 5.0  # conservative estimate
+
+                    net_edge = line_edge - (t_juice_pct / 2.0)
+
+                    if net_edge >= MIN_EDGE_NET:
+                        side = 'UNDER' if diff > 0 else 'OVER'
+                        # Use whichever odds we have
+                        if side == 'OVER' and 'over_odds' in tb:
+                            odds = tb['over_odds']
+                        elif side == 'UNDER' and 'under_odds' in tb:
+                            odds = tb['under_odds']
+                        else:
+                            odds = -110  # fallback display
 
                         opportunities.append({
-                            'player': player,
-                            'game': data['game'],
+                            'player': player, 'game': data['game'],
                             'market': market_name,
                             'book': BOOK_DISPLAY.get(target, target),
                             'type': 'player_prop',
                             'edge': round(net_edge, 1),
-                            'gross_edge': round(gross_edge, 1),
+                            'gross_edge': round(line_edge, 1),
                             'recommendation': f"{side} {t_line}",
                             'odds': odds,
-                            'label1_name': f'{BOOK_DISPLAY.get(target, target)} Odds',
-                            'label1_value': format_american(odds),
-                            'label2_name': 'Fair Odds (no vig)',
-                            'label2_value': format_american(fair_odds),
+                            'label1_name': f'{BOOK_DISPLAY.get(target, target)} Line',
+                            'label1_value': str(t_line),
+                            'label2_name': 'Sharp Consensus',
+                            'label2_value': str(round(consensus, 1)),
                             'label3_name': 'Net Edge',
                             'label3_value': f"+{net_edge:.1f}%",
-                            'target_prob': round(target_p * 100, 1),
-                            'fair_prob': round(fair_p * 100, 1),
-                            'juice_display': f"{t_juice_pct:.1f}%",
+                            'juice_display': f"~{t_juice_pct}%",
                         })
+                    elif net_edge > -3:
+                        side = 'UNDER' if diff > 0 else 'OVER'
+                        near_misses.append((round(net_edge, 1), player,
+                            BOOK_DISPLAY.get(target, target), side, t_line))
 
-                else:
-                    # === SCENARIO B: Different line — line diff minus actual juice ===
-                    diff = t_line - consensus_line
-                    line_edge = abs(diff / consensus_line * 100) if consensus_line != 0 else 0
+    # Log stats
+    log_debug(f"    Players: {stats['players']} total, {stats['with_sharp']} w/2+ sharp, "
+              f"{stats['with_target']} w/target")
+    log_debug(f"    Analysis: {stats['devigged']} full devig, {stats['line_compared']} line-only")
+    log_debug(f"    Results: {len(opportunities)} +EV bets")
 
-                    if abs(diff) < 0.5 or line_edge < 1.0:
-                        continue
-
-                    # Net edge = line edge - actual per-side juice
-                    net_edge = line_edge - t_juice_per_side
-
-                    if net_edge < MIN_EDGE_NET:
-                        continue
-
-                    if diff > 0:
-                        side = 'UNDER'
-                        odds = t_under_odds
-                    else:
-                        side = 'OVER'
-                        odds = t_over_odds
-
-                    opportunities.append({
-                        'player': player,
-                        'game': data['game'],
-                        'market': market_name,
-                        'book': BOOK_DISPLAY.get(target, target),
-                        'type': 'player_prop',
-                        'edge': round(net_edge, 1),
-                        'gross_edge': round(line_edge, 1),
-                        'recommendation': f"{side} {t_line}",
-                        'odds': odds,
-                        'label1_name': f'{BOOK_DISPLAY.get(target, target)} Line',
-                        'label1_value': str(t_line),
-                        'label2_name': 'Sharp Consensus',
-                        'label2_value': str(round(consensus_line, 1)),
-                        'label3_name': 'Net Edge',
-                        'label3_value': f"+{net_edge:.1f}%",
-                        'juice_display': f"{t_juice_pct:.1f}%",
-                    })
+    # Log top near misses
+    if near_misses and not opportunities:
+        near_misses.sort(key=lambda x: x[0], reverse=True)
+        log_debug(f"    Near misses (top 5):")
+        for edge, name, book, side, line in near_misses[:5]:
+            log_debug(f"      {edge:+.1f}% {name} {side} {line} on {book}")
 
     return opportunities
 
 
 # ============================================================
-# GAME MARKET ANALYSIS (with proper devigging)
+# GAME MARKET ANALYSIS (robust outcome pairing)
 # ============================================================
 
 def analyze_game_markets(games_data, market_name=""):
-    """
-    Properly devigs sharp book lines to find true fair probability,
-    then compares target book implied probability (which includes their juice).
-    Edge = fair_prob - target_implied_prob.
-    This edge is ALREADY net of the target book's juice.
-    Only shows positive-edge BET opportunities.
-    """
     if not games_data:
         return []
 
     opportunities = []
+    near_misses = []
+    games_checked = 0
 
     for game in games_data:
         game_info = f"{game.get('away_team', '?')} @ {game.get('home_team', '?')}"
+        games_checked += 1
 
-        # Step 1: Collect all outcomes per book
-        # Structure: {book_name: [(outcome_name, point, odds), ...]}
-        book_outcomes = {}
+        # Collect outcomes per book, keyed by (name, point)
+        # {(name, point): {book: odds}}
+        outcome_odds = {}
+        # Also track paired outcomes per book for devigging
+        book_pairs = {}  # {book: {(name, point): odds}}
 
         for bookmaker in game.get('bookmakers', []):
             book_name = bookmaker['key']
-            book_outcomes[book_name] = []
+            book_pairs[book_name] = {}
             for market in bookmaker.get('markets', []):
                 for outcome in market.get('outcomes', []):
                     name = outcome.get('name', '')
                     odds = outcome.get('price')
                     point = outcome.get('point')
-                    if name and odds is not None:
-                        book_outcomes[book_name].append((name, point, odds))
+                    if not name or odds is None:
+                        continue
+                    key = (name, float(point) if point is not None else None)
+                    if key not in outcome_odds:
+                        outcome_odds[key] = {}
+                    outcome_odds[key][book_name] = odds
+                    book_pairs[book_name][key] = odds
 
-        # Step 2: Identify the two sides of each market
-        # For each book, pair complementary outcomes
-        # (Team A, Team B) for ML; (Over X, Under X) for totals;
-        # (Team A -X, Team B +X) for spreads
+        # Find complementary pairs for devigging
+        # For each book, find the two sides of the market
+        # They share a market but have different outcome names
+        book_devigged = {}  # {book: {outcome_key: fair_prob}}
+        book_juice = {}
 
-        # Collect unique outcome identifiers
-        all_outcomes = set()
-        for book, outcomes in book_outcomes.items():
-            for (name, point, odds) in outcomes:
-                if point is not None:
-                    all_outcomes.add((name, float(point)))
-                else:
-                    all_outcomes.add((name, None))
-
-        # For each outcome, find its complement in each book and devig
-        # Build: {outcome_key: {book: (raw_implied, devigged_fair)}}
-        outcome_fair_probs = {}
-
-        for book_name in SHARP_BOOKS:
-            if book_name not in book_outcomes:
+        for book_name in list(SHARP_BOOKS) + list(TARGET_BOOKS):
+            pairs = book_pairs.get(book_name, {})
+            keys = list(pairs.keys())
+            if len(keys) < 2:
                 continue
 
-            outcomes = book_outcomes[book_name]
-            if len(outcomes) != 2:
-                continue  # Need exactly 2 sides
+            # Take first two outcomes as the pair
+            # (API returns the two sides of a 2-way market)
+            k1, k2 = keys[0], keys[1]
+            imp1 = american_to_implied(pairs[k1])
+            imp2 = american_to_implied(pairs[k2])
+            juice = round((imp1 + imp2 - 1.0) * 100, 1)
+            book_juice[book_name] = juice
 
-            (name_a, point_a, odds_a) = outcomes[0]
-            (name_b, point_b, odds_b) = outcomes[1]
+            fair1, fair2 = devig_pair(imp1, imp2)
+            book_devigged[book_name] = {k1: fair1, k2: fair2}
 
-            prob_a = american_to_implied(odds_a)
-            prob_b = american_to_implied(odds_b)
-
-            fair_a, fair_b = devig_pair(prob_a, prob_b)
-
-            key_a = (name_a, float(point_a)) if point_a is not None else (name_a, None)
-            key_b = (name_b, float(point_b)) if point_b is not None else (name_b, None)
-
-            if key_a not in outcome_fair_probs:
-                outcome_fair_probs[key_a] = []
-            outcome_fair_probs[key_a].append(fair_a)
-
-            if key_b not in outcome_fair_probs:
-                outcome_fair_probs[key_b] = []
-            outcome_fair_probs[key_b].append(fair_b)
-
-        # Step 3: Average devigged fair probs across sharp books
+        # Build consensus fair probs from sharp books
         consensus_fair = {}
-        for key, fair_list in outcome_fair_probs.items():
-            if len(fair_list) >= 2:
-                consensus_fair[key] = sum(fair_list) / len(fair_list)
+        for key in outcome_odds:
+            fair_probs = []
+            for sb in SHARP_BOOKS:
+                if sb in book_devigged and key in book_devigged[sb]:
+                    fair_probs.append(book_devigged[sb][key])
+            if len(fair_probs) >= 2:
+                consensus_fair[key] = sum(fair_probs) / len(fair_probs)
 
         if not consensus_fair:
             continue
 
-        # Step 4: Also devig target books to get gross edge
-        target_fair_probs = {}
-        target_juice = {}
+        # Compare target books
         for target in TARGET_BOOKS:
-            if target not in book_outcomes:
-                continue
-            outcomes = book_outcomes[target]
-            if len(outcomes) == 2:
-                (na, pa, oa) = outcomes[0]
-                (nb, pb, ob) = outcomes[1]
-                imp_a = american_to_implied(oa)
-                imp_b = american_to_implied(ob)
-                overround = (imp_a + imp_b - 1.0) * 100  # total juice %
-                target_juice[target] = round(overround, 1)
-                fair_a, fair_b = devig_pair(imp_a, imp_b)
-                key_a = (na, float(pa)) if pa is not None else (na, None)
-                key_b = (nb, float(pb)) if pb is not None else (nb, None)
-                target_fair_probs[(target, key_a)] = fair_a
-                target_fair_probs[(target, key_b)] = fair_b
-
-        # Step 5: Compare target books to fair probability
-        for target in TARGET_BOOKS:
-            if target not in book_outcomes:
+            if target not in book_pairs:
                 continue
 
-            for (name, point, odds) in book_outcomes[target]:
-                key = (name, float(point)) if point is not None else (name, None)
-
+            for key, odds in book_pairs[target].items():
                 if key not in consensus_fair:
                     continue
 
                 fair_prob = consensus_fair[key]
                 target_implied = american_to_implied(odds)
 
-                # Net edge: fair prob vs target's juiced implied prob
-                # This is what you actually capture after paying their juice
+                # Net edge (after juice)
                 net_edge = (fair_prob - target_implied) * 100
 
+                # Gross edge (target devigged vs consensus)
+                target_fair = None
+                if target in book_devigged and key in book_devigged[target]:
+                    target_fair = book_devigged[target][key]
+                gross_edge = (fair_prob - target_fair) * 100 if target_fair else net_edge
+
+                juice_pct = book_juice.get(target, 0)
+
                 if net_edge < MIN_EDGE_NET:
+                    if net_edge > -3:
+                        name, point = key
+                        if point is not None:
+                            if 'Total' in market_name:
+                                dn = f"{name} {point}"
+                            else:
+                                dn = f"{name} {point:+.1f}"
+                        else:
+                            dn = f"{name} ML"
+                        near_misses.append((round(net_edge, 1), dn,
+                            BOOK_DISPLAY.get(target, target), game_info))
                     continue
 
-                # Gross edge: fair prob vs target's own devigged prob
-                # This is the pure pricing disagreement before juice
-                target_fair = target_fair_probs.get((target, key))
-                if target_fair is not None:
-                    gross_edge = (fair_prob - target_fair) * 100
-                else:
-                    gross_edge = net_edge  # fallback
-
-                # Juice this book is charging on this market
-                juice_pct = target_juice.get(target, 0)
-
                 # Build display name
+                name, point = key
                 if point is not None:
                     if 'Total' in market_name:
                         display_name = f"{name} {point}"
@@ -519,6 +533,15 @@ def analyze_game_markets(games_data, market_name=""):
                     'juice_display': f"{juice_pct}%",
                 })
 
+    log_debug(f"    Games: {games_checked}, Outcomes w/consensus: {len(consensus_fair)}, "
+              f"+EV bets: {len(opportunities)}")
+
+    if near_misses and not opportunities:
+        near_misses.sort(key=lambda x: x[0], reverse=True)
+        log_debug(f"    Near misses (top 5):")
+        for edge, name, book, game in near_misses[:5]:
+            log_debug(f"      {edge:+.1f}% {name} on {book} ({game})")
+
     return opportunities
 
 
@@ -546,10 +569,10 @@ def fetch_ncaab_player_props():
                 opps = analyze_player_props([event_data], prop_name)
                 if opps:
                     all_opps.extend(opps)
-                    log_debug(f"    {away} @ {home} / {prop_name}: {len(opps)} outliers")
+                    log_debug(f"    {away} @ {home} / {prop_name}: {len(opps)} +EV")
             time.sleep(0.3)
 
-    log_debug(f"  NCAAB player props total: {len(all_opps)} outliers")
+    log_debug(f"  NCAAB player props total: {len(all_opps)} +EV bets")
     return all_opps
 
 
@@ -563,8 +586,9 @@ def scan_markets():
     all_opps = []
 
     log_debug("=== SCAN STARTED ===")
-    log_debug(f"Threshold: >{MIN_EDGE_NET}% net edge (any +EV bet after juice)")
+    log_debug(f"Threshold: >{MIN_EDGE_NET}% net edge after juice")
 
+    # 1. Player props (NBA/NFL/NHL) via bulk endpoint
     log_debug("--- Player Props (NBA/NFL/NHL) ---")
     for sport, market, name in PLAYER_PROP_MARKETS:
         games = fetch_odds(sport, market)
@@ -572,19 +596,19 @@ def scan_markets():
             opps = analyze_player_props(games, name)
             if opps:
                 all_opps.extend(opps)
-                log_debug(f"    -> {len(opps)} profitable edges")
         time.sleep(0.5)
 
-    log_debug("--- NCAAB Game Markets (devigged) ---")
+    # 2. Game markets (NBA/NHL/NCAAB) via bulk endpoint
+    log_debug("--- Game Markets (NBA/NHL/NCAAB) ---")
     for sport, market, name in GAME_LEVEL_MARKETS:
         games = fetch_odds(sport, market)
         if games:
             opps = analyze_game_markets(games, name)
             if opps:
                 all_opps.extend(opps)
-                log_debug(f"    -> {len(opps)} profitable edges")
         time.sleep(0.5)
 
+    # 3. NCAAB player props (event-by-event)
     log_debug("--- NCAAB Player Props (event-by-event) ---")
     ncaab_props = fetch_ncaab_player_props()
     all_opps.extend(ncaab_props)
@@ -595,7 +619,7 @@ def scan_markets():
     state['last_scan'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     state['scanning'] = False
 
-    log_debug(f"=== SCAN COMPLETE: {len(all_opps)} profitable opportunities ===")
+    log_debug(f"=== SCAN COMPLETE: {len(all_opps)} +EV opportunities ===")
 
 
 # ============================================================
