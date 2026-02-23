@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Arbitrage Finder</title>
+    <title>Colorado +EV Finder</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -119,7 +119,14 @@
             font-size: 0.7em; font-weight: 600;
         }
         .badge-fd { background: #1a73e8; color: #fff; }
-        .badge-espn { background: #cc0000; color: #fff; }
+        .badge-dk { background: #53a548; color: #fff; }
+        .badge-mgm { background: #bfa04b; color: #1a1a1a; }
+        .badge-br { background: #1d7748; color: #fff; }
+        .badge-tsb { background: #cc0000; color: #fff; }
+        .badge-hr { background: #e8510d; color: #fff; }
+        .badge-bb { background: #7b3fa0; color: #fff; }
+        .badge-bp { background: #005da6; color: #fff; }
+        .badge-book { background: #2d3748; color: #a0aec0; }
         .badge-market { background: #2d3748; color: #a0aec0; }
 
         /* Data grid */
@@ -182,8 +189,8 @@
 <body>
 
     <div class="header">
-        <h1>🎯 Arbitrage Finder</h1>
-        <div class="sub">Only showing +EV bets after juice</div>
+        <h1>🎯 Colorado +EV Finder</h1>
+        <div class="sub">8 CO-legal books · Any outlier vs consensus · Manual scan only</div>
     </div>
 
     <div class="stats">
@@ -228,11 +235,11 @@
     </div>
 
     <div class="explainer" id="explainer" style="display:none;">
-        <strong>How edges are calculated:</strong> Sharp books (DraftKings, BetMGM, Caesars)
-        are devigged to find true fair odds. <strong>Gross</strong> = pricing difference before juice
-        (sharp fair vs target devigged). <strong>Net</strong> = what you capture after the vig
-        (sharp fair vs target's juiced odds). Any positive net edge is +EV long-term.
-        A +3% net edge ≈ $3 profit per $100 wagered. The book's actual vig is shown on each card.
+        <strong>How it works:</strong> All 8 CO-legal books are devigged to find their true fair odds.
+        Each book is compared against a <strong>leave-one-out consensus</strong> of the other books.
+        If one book's odds imply a lower probability than the rest agree on, that's a +EV outlier.
+        <strong>Gross</strong> = pricing disagreement before juice.
+        <strong>Net</strong> = your real edge after paying the vig. Any positive net = profitable long-term.
     </div>
 
     <script>
@@ -327,7 +334,13 @@
             container.innerHTML = opps.map(opp => {
                 const cls = opp.edge >= 6 ? 'elite' : opp.edge >= 4 ? 'strong' : '';
                 const color = opp.edge >= 6 ? '#ff4757' : opp.edge >= 4 ? '#ffa502' : '#48bb78';
-                const bookBadge = opp.book === 'FanDuel' ? 'badge-fd' : 'badge-espn';
+                const bookBadges = {
+                    'FanDuel': 'badge-fd', 'DraftKings': 'badge-dk',
+                    'BetMGM': 'badge-mgm', 'BetRivers': 'badge-br',
+                    'theScore Bet': 'badge-tsb', 'Hard Rock': 'badge-hr',
+                    'Bally Bet': 'badge-bb', 'betPARX': 'badge-bp',
+                };
+                const bookBadge = bookBadges[opp.book] || 'badge-book';
 
                 // Gross edge display (if available, otherwise same as net)
                 const grossEdge = opp.gross_edge !== undefined ? opp.gross_edge : opp.edge;
@@ -406,8 +419,6 @@
             }).join('');
         }
 
-        // Auto-refresh every 5 minutes
-        setInterval(() => { if (!scanning) scan(); }, 5 * 60 * 1000);
     </script>
 </body>
 </html>
