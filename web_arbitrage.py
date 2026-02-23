@@ -26,17 +26,6 @@ state = {
 # MARKETS
 # ============================================================
 
-# Player props via bulk /odds endpoint
-PLAYER_PROP_MARKETS = [
-    ('basketball_nba', 'player_points', 'NBA Points'),
-    ('basketball_nba', 'player_rebounds', 'NBA Rebounds'),
-    ('basketball_nba', 'player_assists', 'NBA Assists'),
-    ('basketball_nba', 'player_threes', 'NBA Threes'),
-    ('americanfootball_nfl', 'player_pass_tds', 'NFL Pass TDs'),
-    ('americanfootball_nfl', 'player_pass_yds', 'NFL Pass Yards'),
-    ('icehockey_nhl', 'player_points', 'NHL Points'),
-]
-
 # Game markets via bulk /odds endpoint (all sports)
 GAME_LEVEL_MARKETS = [
     ('basketball_ncaab', 'spreads', 'NCAAB Spreads'),
@@ -48,13 +37,6 @@ GAME_LEVEL_MARKETS = [
     ('icehockey_nhl', 'spreads', 'NHL Puckline'),
     ('icehockey_nhl', 'totals', 'NHL Totals'),
     ('icehockey_nhl', 'h2h', 'NHL Moneyline'),
-]
-
-# NCAA player props fetched event-by-event
-NCAAB_PROP_MARKETS = [
-    ('player_points', 'NCAAB Points'),
-    ('player_rebounds', 'NCAAB Rebounds'),
-    ('player_assists', 'NCAAB Assists'),
 ]
 
 BOOKMAKERS = ['fanduel', 'espnbet', 'draftkings', 'betmgm', 'williamhill_us']
@@ -119,31 +101,23 @@ def fetch_odds(sport, market):
         if response.status_code == 200:
             data = response.json()
             remaining = response.headers.get('x-requests-remaining', '?')
-            log_debug(f"  {sport}/{market}: {len(data)} games (API left: {remaining})")
+            used = response.headers.get('x-requests-used', '?')
+            log_debug(f"  {sport}/{market}: {len(data)} games (used: {used}, left: {remaining})")
             return data
         else:
-            log_debug(f"  {sport}/{market}: HTTP {response.status_code}")
+            # Log the actual error message
+            try:
+                err_body = response.json() if response.text else {}
+                err_msg = err_body.get('message', response.text[:120])
+            except:
+                err_msg = response.text[:120]
+            log_debug(f"  {sport}/{market}: HTTP {response.status_code} - {err_msg}")
     except Exception as e:
         log_debug(f"  {sport}/{market}: Error - {str(e)[:80]}")
     return None
 
-def fetch_ncaab_events():
-    url = f"https://api.the-odds-api.com/v4/sports/basketball_ncaab/events"
-    params = {'apiKey': API_KEY}
-    try:
-        response = requests.get(url, params=params, timeout=30)
-        if response.status_code == 200:
-            events = response.json()
-            log_debug(f"  Found {len(events)} upcoming NCAAB events")
-            return events
-        else:
-            log_debug(f"  NCAAB events: HTTP {response.status_code}")
-    except Exception as e:
-        log_debug(f"  NCAAB events: Error - {str(e)[:80]}")
-    return []
-
-def fetch_event_odds(event_id, market):
-    url = f"https://api.the-odds-api.com/v4/sports/basketball_ncaab/events/{event_id}/odds"
+def fetch_event_odds(sport, event_id, market):
+    url = f"https://api.the-odds-api.com/v4/sports/{sport}/events/{event_id}/odds"
     params = {
         'apiKey': API_KEY, 'regions': 'us', 'markets': market,
         'bookmakers': ','.join(BOOKMAKERS), 'oddsFormat': 'american'
@@ -152,9 +126,33 @@ def fetch_event_odds(event_id, market):
         response = requests.get(url, params=params, timeout=30)
         if response.status_code == 200:
             return response.json()
-    except:
-        pass
+        elif response.status_code == 401:
+            log_debug(f"    Event {event_id[:8]}../{market}: 401 - API key issue")
+            return None
+    except Exception as e:
+        log_debug(f"    Event fetch error: {str(e)[:60]}")
     return None
+
+
+def fetch_events(sport):
+    """Get list of upcoming events for any sport"""
+    url = f"https://api.the-odds-api.com/v4/sports/{sport}/events"
+    params = {'apiKey': API_KEY}
+    try:
+        response = requests.get(url, params=params, timeout=30)
+        if response.status_code == 200:
+            events = response.json()
+            log_debug(f"  {sport}: {len(events)} upcoming events")
+            return events
+        else:
+            try:
+                err_msg = response.json().get('message', '')
+            except:
+                err_msg = response.text[:80]
+            log_debug(f"  {sport} events: HTTP {response.status_code} - {err_msg}")
+    except Exception as e:
+        log_debug(f"  {sport} events: Error - {str(e)[:60]}")
+    return []
 
 
 # ============================================================
@@ -546,33 +544,54 @@ def analyze_game_markets(games_data, market_name=""):
 
 
 # ============================================================
-# NCAAB EVENT-LEVEL PLAYER PROPS
+# EVENT-LEVEL PLAYER PROPS (works for any sport)
 # ============================================================
 
-def fetch_ncaab_player_props():
+# All prop markets to scan, by sport
+EVENT_PROP_MARKETS = [
+    ('basketball_nba', [
+        ('player_points', 'NBA Points'),
+        ('player_rebounds', 'NBA Rebounds'),
+        ('player_assists', 'NBA Assists'),
+        ('player_threes', 'NBA Threes'),
+    ]),
+    ('basketball_ncaab', [
+        ('player_points', 'NCAAB Points'),
+        ('player_rebounds', 'NCAAB Rebounds'),
+        ('player_assists', 'NCAAB Assists'),
+    ]),
+    ('icehockey_nhl', [
+        ('player_points', 'NHL Points'),
+    ]),
+]
+
+def fetch_event_props(sport, prop_markets, max_events=15):
+    """Fetch player props for a sport via event-level endpoints"""
     all_opps = []
-    events = fetch_ncaab_events()
+    events = fetch_events(sport)
     if not events:
-        log_debug("  No NCAAB events - skipping player props")
         return []
 
-    events_to_scan = events[:15]
-    log_debug(f"  Scanning props for {len(events_to_scan)} of {len(events)} NCAAB events")
+    events_to_scan = events[:max_events]
+    log_debug(f"  Scanning {len(events_to_scan)} of {len(events)} {sport} events")
 
+    events_with_data = 0
     for event in events_to_scan:
         event_id = event.get('id')
         home = event.get('home_team', '?')
         away = event.get('away_team', '?')
-        for prop_market, prop_name in NCAAB_PROP_MARKETS:
-            event_data = fetch_event_odds(event_id, prop_market)
+
+        for prop_market, prop_name in prop_markets:
+            event_data = fetch_event_odds(sport, event_id, prop_market)
             if event_data and event_data.get('bookmakers'):
+                events_with_data += 1
                 opps = analyze_player_props([event_data], prop_name)
                 if opps:
                     all_opps.extend(opps)
                     log_debug(f"    {away} @ {home} / {prop_name}: {len(opps)} +EV")
             time.sleep(0.3)
 
-    log_debug(f"  NCAAB player props total: {len(all_opps)} +EV bets")
+    log_debug(f"  {sport} props: {events_with_data} event/markets had data, {len(all_opps)} +EV bets")
     return all_opps
 
 
@@ -588,18 +607,14 @@ def scan_markets():
     log_debug("=== SCAN STARTED ===")
     log_debug(f"Threshold: >{MIN_EDGE_NET}% net edge after juice")
 
-    # 1. Player props (NBA/NFL/NHL) via bulk endpoint
-    log_debug("--- Player Props (NBA/NFL/NHL) ---")
-    for sport, market, name in PLAYER_PROP_MARKETS:
-        games = fetch_odds(sport, market)
-        if games:
-            opps = analyze_player_props(games, name)
-            if opps:
-                all_opps.extend(opps)
-        time.sleep(0.5)
+    # 1. Player props via event-level endpoints (all sports)
+    log_debug("--- Player Props (event-by-event) ---")
+    for sport, prop_markets in EVENT_PROP_MARKETS:
+        opps = fetch_event_props(sport, prop_markets)
+        all_opps.extend(opps)
 
-    # 2. Game markets (NBA/NHL/NCAAB) via bulk endpoint
-    log_debug("--- Game Markets (NBA/NHL/NCAAB) ---")
+    # 2. Game markets via bulk endpoint (spreads/totals/moneylines)
+    log_debug("--- Game Markets (bulk) ---")
     for sport, market, name in GAME_LEVEL_MARKETS:
         games = fetch_odds(sport, market)
         if games:
@@ -607,11 +622,6 @@ def scan_markets():
             if opps:
                 all_opps.extend(opps)
         time.sleep(0.5)
-
-    # 3. NCAAB player props (event-by-event)
-    log_debug("--- NCAAB Player Props (event-by-event) ---")
-    ncaab_props = fetch_ncaab_player_props()
-    all_opps.extend(ncaab_props)
 
     all_opps.sort(key=lambda x: x['edge'], reverse=True)
 
@@ -646,6 +656,24 @@ def get_opportunities():
         'scanning': state['scanning'],
         'debug': state.get('debug_info', [])
     })
+
+@app.route('/api/key-status')
+def key_status():
+    """Quick check if API key is working and how many requests remain"""
+    url = "https://api.the-odds-api.com/v4/sports"
+    params = {'apiKey': API_KEY}
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        remaining = r.headers.get('x-requests-remaining', '?')
+        used = r.headers.get('x-requests-used', '?')
+        return jsonify({
+            'status': 'ok' if r.status_code == 200 else 'error',
+            'http_code': r.status_code,
+            'requests_used': used,
+            'requests_remaining': remaining,
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
