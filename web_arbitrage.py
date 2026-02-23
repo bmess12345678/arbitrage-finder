@@ -13,7 +13,33 @@ import os
 
 app = Flask(__name__)
 
-API_KEY = "19c83d930cc9b8bfcd3da28458f38d76"
+# Rotating API keys — spreads usage evenly
+API_KEYS = [
+    "19c83d930cc9b8bfcd3da28458f38d76",
+    "1c0914963fab326fc7e3dd488c5cb89b",
+    "836b2b862b5c0f0edf90c1c8337c002d",
+    "a746929baa0218b074453992586cbcd0",
+]
+_key_index = 0
+_dead_keys = set()  # keys that returned 401 this scan
+
+def get_api_key():
+    """Rotate through API keys, skip dead ones"""
+    global _key_index
+    attempts = 0
+    while attempts < len(API_KEYS):
+        key = API_KEYS[_key_index % len(API_KEYS)]
+        _key_index += 1
+        if key not in _dead_keys:
+            return key
+        attempts += 1
+    return None  # all keys exhausted
+
+def mark_key_dead(key):
+    """Mark a key as exhausted so we stop using it"""
+    _dead_keys.add(key)
+    remaining = len(API_KEYS) - len(_dead_keys)
+    log_debug(f"  ⚠️ API key ...{key[-6:]} exhausted. {remaining} keys remaining.")
 
 state = {
     'opportunities': [],
@@ -26,16 +52,10 @@ state = {
 # MARKETS
 # ============================================================
 
-# Game markets via bulk /odds endpoint (all sports)
+# Game markets: ONLY moneylines (spreads/totals are -110/-110 everywhere, no edge after juice)
 GAME_LEVEL_MARKETS = [
-    ('basketball_ncaab', 'spreads', 'NCAAB Spreads'),
-    ('basketball_ncaab', 'totals', 'NCAAB Totals'),
     ('basketball_ncaab', 'h2h', 'NCAAB Moneyline'),
-    ('basketball_nba', 'spreads', 'NBA Spreads'),
-    ('basketball_nba', 'totals', 'NBA Totals'),
     ('basketball_nba', 'h2h', 'NBA Moneyline'),
-    ('icehockey_nhl', 'spreads', 'NHL Puckline'),
-    ('icehockey_nhl', 'totals', 'NHL Totals'),
     ('icehockey_nhl', 'h2h', 'NHL Moneyline'),
 ]
 
@@ -91,9 +111,13 @@ def implied_to_american(prob):
 # ============================================================
 
 def fetch_odds(sport, market):
+    key = get_api_key()
+    if not key:
+        log_debug(f"  {sport}/{market}: All API keys exhausted!")
+        return None
     url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds"
     params = {
-        'apiKey': API_KEY, 'regions': 'us', 'markets': market,
+        'apiKey': key, 'regions': 'us', 'markets': market,
         'bookmakers': ','.join(BOOKMAKERS), 'oddsFormat': 'american'
     }
     try:
@@ -101,14 +125,14 @@ def fetch_odds(sport, market):
         if response.status_code == 200:
             data = response.json()
             remaining = response.headers.get('x-requests-remaining', '?')
-            used = response.headers.get('x-requests-used', '?')
-            log_debug(f"  {sport}/{market}: {len(data)} games (used: {used}, left: {remaining})")
+            log_debug(f"  {sport}/{market}: {len(data)} games (key ...{key[-6:]}, left: {remaining})")
             return data
+        elif response.status_code == 401:
+            mark_key_dead(key)
+            return fetch_odds(sport, market)  # retry with next key
         else:
-            # Log the actual error message
             try:
-                err_body = response.json() if response.text else {}
-                err_msg = err_body.get('message', response.text[:120])
+                err_msg = response.json().get('message', response.text[:120])
             except:
                 err_msg = response.text[:120]
             log_debug(f"  {sport}/{market}: HTTP {response.status_code} - {err_msg}")
@@ -117,9 +141,12 @@ def fetch_odds(sport, market):
     return None
 
 def fetch_event_odds(sport, event_id, market):
+    key = get_api_key()
+    if not key:
+        return None
     url = f"https://api.the-odds-api.com/v4/sports/{sport}/events/{event_id}/odds"
     params = {
-        'apiKey': API_KEY, 'regions': 'us', 'markets': market,
+        'apiKey': key, 'regions': 'us', 'markets': market,
         'bookmakers': ','.join(BOOKMAKERS), 'oddsFormat': 'american'
     }
     try:
@@ -127,29 +154,32 @@ def fetch_event_odds(sport, event_id, market):
         if response.status_code == 200:
             return response.json()
         elif response.status_code == 401:
-            log_debug(f"    Event {event_id[:8]}../{market}: 401 - API key issue")
-            return None
-    except Exception as e:
-        log_debug(f"    Event fetch error: {str(e)[:60]}")
+            mark_key_dead(key)
+            return fetch_event_odds(sport, event_id, market)  # retry next key
+    except:
+        pass
     return None
 
 
 def fetch_events(sport):
     """Get list of upcoming events for any sport"""
+    key = get_api_key()
+    if not key:
+        log_debug(f"  {sport} events: All API keys exhausted!")
+        return []
     url = f"https://api.the-odds-api.com/v4/sports/{sport}/events"
-    params = {'apiKey': API_KEY}
+    params = {'apiKey': key}
     try:
         response = requests.get(url, params=params, timeout=30)
         if response.status_code == 200:
             events = response.json()
-            log_debug(f"  {sport}: {len(events)} upcoming events")
+            log_debug(f"  {sport}: {len(events)} events (key ...{key[-6:]})")
             return events
+        elif response.status_code == 401:
+            mark_key_dead(key)
+            return fetch_events(sport)  # retry next key
         else:
-            try:
-                err_msg = response.json().get('message', '')
-            except:
-                err_msg = response.text[:80]
-            log_debug(f"  {sport} events: HTTP {response.status_code} - {err_msg}")
+            log_debug(f"  {sport} events: HTTP {response.status_code}")
     except Exception as e:
         log_debug(f"  {sport} events: Error - {str(e)[:60]}")
     return []
@@ -547,22 +577,18 @@ def analyze_game_markets(games_data, market_name=""):
 # EVENT-LEVEL PLAYER PROPS (works for any sport)
 # ============================================================
 
-# All prop markets to scan, by sport
+# Props to scan: points & rebounds only (highest pricing variance, best edge probability)
+# Assists/threes have less book coverage → rarely generate edges
 EVENT_PROP_MARKETS = [
     ('basketball_nba', [
         ('player_points', 'NBA Points'),
         ('player_rebounds', 'NBA Rebounds'),
-        ('player_assists', 'NBA Assists'),
-        ('player_threes', 'NBA Threes'),
-    ]),
+    ], 8),   # max 8 events
     ('basketball_ncaab', [
         ('player_points', 'NCAAB Points'),
         ('player_rebounds', 'NCAAB Rebounds'),
-        ('player_assists', 'NCAAB Assists'),
-    ]),
-    ('icehockey_nhl', [
-        ('player_points', 'NHL Points'),
-    ]),
+    ], 8),   # max 8 events
+    # NHL props skipped — sparse book coverage, rarely have edges
 ]
 
 def fetch_event_props(sport, prop_markets, max_events=15):
@@ -600,28 +626,36 @@ def fetch_event_props(sport, prop_markets, max_events=15):
 # ============================================================
 
 def scan_markets():
+    global _dead_keys
     state['scanning'] = True
     state['debug_info'] = []
+    _dead_keys = set()  # reset dead keys each scan
     all_opps = []
 
     log_debug("=== SCAN STARTED ===")
-    log_debug(f"Threshold: >{MIN_EDGE_NET}% net edge after juice")
+    log_debug(f"Keys: {len(API_KEYS)} | Threshold: >{MIN_EDGE_NET}% net edge after juice")
 
-    # 1. Player props via event-level endpoints (all sports)
-    log_debug("--- Player Props (event-by-event) ---")
-    for sport, prop_markets in EVENT_PROP_MARKETS:
-        opps = fetch_event_props(sport, prop_markets)
+    # 1. Player props via event-level endpoints
+    log_debug("--- Player Props (points & rebounds) ---")
+    for sport, prop_markets, max_ev in EVENT_PROP_MARKETS:
+        if len(_dead_keys) >= len(API_KEYS):
+            log_debug("  All keys exhausted — stopping scan")
+            break
+        opps = fetch_event_props(sport, prop_markets, max_events=max_ev)
         all_opps.extend(opps)
 
-    # 2. Game markets via bulk endpoint (spreads/totals/moneylines)
-    log_debug("--- Game Markets (bulk) ---")
+    # 2. Moneylines only (spreads/totals rarely have edges after juice)
+    log_debug("--- Moneylines (bulk) ---")
     for sport, market, name in GAME_LEVEL_MARKETS:
+        if len(_dead_keys) >= len(API_KEYS):
+            log_debug("  All keys exhausted — stopping scan")
+            break
         games = fetch_odds(sport, market)
         if games:
             opps = analyze_game_markets(games, name)
             if opps:
                 all_opps.extend(opps)
-        time.sleep(0.5)
+        time.sleep(0.3)
 
     all_opps.sort(key=lambda x: x['edge'], reverse=True)
 
@@ -629,7 +663,8 @@ def scan_markets():
     state['last_scan'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     state['scanning'] = False
 
-    log_debug(f"=== SCAN COMPLETE: {len(all_opps)} +EV opportunities ===")
+    active_keys = len(API_KEYS) - len(_dead_keys)
+    log_debug(f"=== SCAN COMPLETE: {len(all_opps)} +EV opportunities ({active_keys}/{len(API_KEYS)} keys still active) ===")
 
 
 # ============================================================
@@ -659,21 +694,22 @@ def get_opportunities():
 
 @app.route('/api/key-status')
 def key_status():
-    """Quick check if API key is working and how many requests remain"""
-    url = "https://api.the-odds-api.com/v4/sports"
-    params = {'apiKey': API_KEY}
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        remaining = r.headers.get('x-requests-remaining', '?')
-        used = r.headers.get('x-requests-used', '?')
-        return jsonify({
-            'status': 'ok' if r.status_code == 200 else 'error',
-            'http_code': r.status_code,
-            'requests_used': used,
-            'requests_remaining': remaining,
-        })
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)})
+    """Check status of all API keys"""
+    results = []
+    for key in API_KEYS:
+        url = "https://api.the-odds-api.com/v4/sports"
+        params = {'apiKey': key}
+        try:
+            r = requests.get(url, params=params, timeout=10)
+            results.append({
+                'key': f'...{key[-6:]}',
+                'status': 'ok' if r.status_code == 200 else 'exhausted',
+                'remaining': r.headers.get('x-requests-remaining', '?'),
+                'used': r.headers.get('x-requests-used', '?'),
+            })
+        except Exception as e:
+            results.append({'key': f'...{key[-6:]}', 'status': 'error', 'message': str(e)[:60]})
+    return jsonify({'keys': results})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
