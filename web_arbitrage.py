@@ -1,7 +1,7 @@
 """
-Premium Arbitrage Finder - Web Version
-Properly devigs sharp books. Shows any +EV bet after juice.
-Shows gross and net edge. Comprehensive near-miss logging.
++EV Finder — Colorado Sportsbooks
+Compares all CO-legal books against each other.
+Any book that's an outlier vs consensus = +EV bet.
 """
 
 from flask import Flask, render_template, jsonify
@@ -13,7 +13,10 @@ import os
 
 app = Flask(__name__)
 
-# Rotating API keys — spreads usage evenly
+# ============================================================
+# API KEY ROTATION
+# ============================================================
+
 API_KEYS = [
     "19c83d930cc9b8bfcd3da28458f38d76",
     "1c0914963fab326fc7e3dd488c5cb89b",
@@ -21,10 +24,9 @@ API_KEYS = [
     "a746929baa0218b074453992586cbcd0",
 ]
 _key_index = 0
-_dead_keys = set()  # keys that returned 401 this scan
+_dead_keys = set()
 
 def get_api_key():
-    """Rotate through API keys, skip dead ones"""
     global _key_index
     attempts = 0
     while attempts < len(API_KEYS):
@@ -33,13 +35,54 @@ def get_api_key():
         if key not in _dead_keys:
             return key
         attempts += 1
-    return None  # all keys exhausted
+    return None
 
 def mark_key_dead(key):
-    """Mark a key as exhausted so we stop using it"""
     _dead_keys.add(key)
     remaining = len(API_KEYS) - len(_dead_keys)
-    log_debug(f"  ⚠️ API key ...{key[-6:]} exhausted. {remaining} keys remaining.")
+    log_debug(f"  ⚠️ Key ...{key[-6:]} exhausted. {remaining} keys left.")
+
+
+# ============================================================
+# COLORADO-LEGAL SPORTSBOOKS (available on The Odds API free tier)
+# ============================================================
+
+# All CO-legal books on the API (<=10 = 1 region cost per call)
+ALL_BOOKS = [
+    'fanduel', 'draftkings', 'betmgm', 'betrivers',
+    'espnbet', 'hardrockbet', 'ballybet', 'betparx',
+]
+
+BOOK_DISPLAY = {
+    'fanduel': 'FanDuel',
+    'draftkings': 'DraftKings',
+    'betmgm': 'BetMGM',
+    'betrivers': 'BetRivers',
+    'espnbet': 'theScore Bet',
+    'hardrockbet': 'Hard Rock',
+    'ballybet': 'Bally Bet',
+    'betparx': 'betPARX',
+}
+
+# Markets to scan
+GAME_MARKETS = [
+    ('basketball_nba', 'h2h', 'NBA Moneyline'),
+    ('basketball_ncaab', 'h2h', 'NCAAB Moneyline'),
+    ('icehockey_nhl', 'h2h', 'NHL Moneyline'),
+]
+
+PROP_MARKETS = [
+    ('basketball_nba', [
+        ('player_points', 'NBA Points'),
+        ('player_rebounds', 'NBA Rebounds'),
+    ], 8),
+    ('basketball_ncaab', [
+        ('player_points', 'NCAAB Points'),
+        ('player_rebounds', 'NCAAB Rebounds'),
+    ], 8),
+]
+
+MIN_EDGE_NET = 0.1  # Show any +EV bet
 
 state = {
     'opportunities': [],
@@ -47,29 +90,6 @@ state = {
     'scanning': False,
     'debug_info': []
 }
-
-# ============================================================
-# MARKETS
-# ============================================================
-
-# Game markets: ONLY moneylines (spreads/totals are -110/-110 everywhere, no edge after juice)
-GAME_LEVEL_MARKETS = [
-    ('basketball_ncaab', 'h2h', 'NCAAB Moneyline'),
-    ('basketball_nba', 'h2h', 'NBA Moneyline'),
-    ('icehockey_nhl', 'h2h', 'NHL Moneyline'),
-]
-
-BOOKMAKERS = ['fanduel', 'espnbet', 'draftkings', 'betmgm', 'williamhill_us']
-SHARP_BOOKS = ['draftkings', 'betmgm', 'williamhill_us']
-TARGET_BOOKS = ['fanduel', 'espnbet']
-BOOK_DISPLAY = {
-    'fanduel': 'FanDuel', 'espnbet': 'ESPN Bet',
-    'draftkings': 'DraftKings', 'betmgm': 'BetMGM', 'williamhill_us': 'Caesars'
-}
-
-# Show any bet with positive net edge
-MIN_EDGE_NET = 0.1
-
 
 def log_debug(msg):
     ts = datetime.now().strftime('%H:%M:%S')
@@ -113,32 +133,52 @@ def implied_to_american(prob):
 def fetch_odds(sport, market):
     key = get_api_key()
     if not key:
-        log_debug(f"  {sport}/{market}: All API keys exhausted!")
+        log_debug(f"  {sport}/{market}: All keys exhausted!")
         return None
     url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds"
     params = {
-        'apiKey': key, 'regions': 'us', 'markets': market,
-        'bookmakers': ','.join(BOOKMAKERS), 'oddsFormat': 'american'
+        'apiKey': key, 'regions': 'us,us2', 'markets': market,
+        'bookmakers': ','.join(ALL_BOOKS), 'oddsFormat': 'american'
     }
     try:
-        response = requests.get(url, params=params, timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            remaining = response.headers.get('x-requests-remaining', '?')
-            log_debug(f"  {sport}/{market}: {len(data)} games (key ...{key[-6:]}, left: {remaining})")
+        r = requests.get(url, params=params, timeout=30)
+        if r.status_code == 200:
+            data = r.json()
+            left = r.headers.get('x-requests-remaining', '?')
+            log_debug(f"  {sport}/{market}: {len(data)} games (key ...{key[-6:]}, left: {left})")
             return data
-        elif response.status_code == 401:
+        elif r.status_code == 401:
             mark_key_dead(key)
-            return fetch_odds(sport, market)  # retry with next key
+            return fetch_odds(sport, market)
         else:
             try:
-                err_msg = response.json().get('message', response.text[:120])
+                msg = r.json().get('message', r.text[:100])
             except:
-                err_msg = response.text[:120]
-            log_debug(f"  {sport}/{market}: HTTP {response.status_code} - {err_msg}")
+                msg = r.text[:100]
+            log_debug(f"  {sport}/{market}: HTTP {r.status_code} - {msg}")
     except Exception as e:
         log_debug(f"  {sport}/{market}: Error - {str(e)[:80]}")
     return None
+
+def fetch_events(sport):
+    key = get_api_key()
+    if not key:
+        log_debug(f"  {sport}: All keys exhausted!")
+        return []
+    url = f"https://api.the-odds-api.com/v4/sports/{sport}/events"
+    params = {'apiKey': key}
+    try:
+        r = requests.get(url, params=params, timeout=30)
+        if r.status_code == 200:
+            events = r.json()
+            log_debug(f"  {sport}: {len(events)} events (key ...{key[-6:]})")
+            return events
+        elif r.status_code == 401:
+            mark_key_dead(key)
+            return fetch_events(sport)
+    except Exception as e:
+        log_debug(f"  {sport} events: Error - {str(e)[:60]}")
+    return []
 
 def fetch_event_odds(sport, event_id, market):
     key = get_api_key()
@@ -146,205 +186,23 @@ def fetch_event_odds(sport, event_id, market):
         return None
     url = f"https://api.the-odds-api.com/v4/sports/{sport}/events/{event_id}/odds"
     params = {
-        'apiKey': key, 'regions': 'us', 'markets': market,
-        'bookmakers': ','.join(BOOKMAKERS), 'oddsFormat': 'american'
+        'apiKey': key, 'regions': 'us,us2', 'markets': market,
+        'bookmakers': ','.join(ALL_BOOKS), 'oddsFormat': 'american'
     }
     try:
-        response = requests.get(url, params=params, timeout=30)
-        if response.status_code == 200:
-            return response.json()
-        elif response.status_code == 401:
+        r = requests.get(url, params=params, timeout=30)
+        if r.status_code == 200:
+            return r.json()
+        elif r.status_code == 401:
             mark_key_dead(key)
-            return fetch_event_odds(sport, event_id, market)  # retry next key
+            return fetch_event_odds(sport, event_id, market)
     except:
         pass
     return None
 
 
-def fetch_events(sport):
-    """Get list of upcoming events for any sport"""
-    key = get_api_key()
-    if not key:
-        log_debug(f"  {sport} events: All API keys exhausted!")
-        return []
-    url = f"https://api.the-odds-api.com/v4/sports/{sport}/events"
-    params = {'apiKey': key}
-    try:
-        response = requests.get(url, params=params, timeout=30)
-        if response.status_code == 200:
-            events = response.json()
-            log_debug(f"  {sport}: {len(events)} events (key ...{key[-6:]})")
-            return events
-        elif response.status_code == 401:
-            mark_key_dead(key)
-            return fetch_events(sport)  # retry next key
-        else:
-            log_debug(f"  {sport} events: HTTP {response.status_code}")
-    except Exception as e:
-        log_debug(f"  {sport} events: Error - {str(e)[:60]}")
-    return []
-
-
 # ============================================================
-# PLAYER PROP ANALYSIS
-#
-# Strategy: Try devig (both sides) first for accurate net edge.
-# Fall back to line-comparison for players missing one side.
-# ============================================================
-
-def analyze_player_props(games_data, market_name=""):
-    if not games_data:
-        return []
-
-    opportunities = []
-    near_misses = []
-    stats = {'players': 0, 'with_sharp': 0, 'with_target': 0, 'devigged': 0,
-             'diff_line_skipped': 0, 'insufficient_data': 0}
-
-    for game in games_data:
-        game_info = f"{game.get('away_team', '?')} @ {game.get('home_team', '?')}"
-
-        # Collect player data: {player: {book: {line, over_odds, under_odds}}}
-        players = {}
-        for bookmaker in game.get('bookmakers', []):
-            book_name = bookmaker['key']
-            for market in bookmaker.get('markets', []):
-                for outcome in market.get('outcomes', []):
-                    player = outcome.get('description', '')
-                    if not player:
-                        continue
-                    line = outcome.get('point')
-                    odds = outcome.get('price')
-                    side = outcome.get('name', '').lower()
-                    if line is None or odds is None:
-                        continue
-
-                    if player not in players:
-                        players[player] = {'game': game_info, 'books': {}}
-                    if book_name not in players[player]['books']:
-                        players[player]['books'][book_name] = {'line': line}
-
-                    if 'over' in side:
-                        players[player]['books'][book_name]['over_odds'] = odds
-                    elif 'under' in side:
-                        players[player]['books'][book_name]['under_odds'] = odds
-                    players[player]['books'][book_name]['line'] = line
-
-        for player, data in players.items():
-            stats['players'] += 1
-            books = data['books']
-
-            # Sharp books with at least a line
-            sharp_available = [sb for sb in SHARP_BOOKS if sb in books]
-            if len(sharp_available) < 2:
-                continue
-            stats['with_sharp'] += 1
-
-            # Target books available
-            targets_available = [tb for tb in TARGET_BOOKS if tb in books]
-            if not targets_available:
-                continue
-            stats['with_target'] += 1
-
-            # Try DEVIG approach: sharp books with both sides
-            sharp_with_both = [sb for sb in sharp_available
-                               if 'over_odds' in books[sb] and 'under_odds' in books[sb]]
-
-            for target in targets_available:
-                tb = books[target]
-                t_line = tb['line']
-                has_both_sides = 'over_odds' in tb and 'under_odds' in tb
-
-                if len(sharp_with_both) >= 2 and has_both_sides:
-                    # === FULL DEVIG (both sides available) ===
-                    stats['devigged'] += 1
-
-                    # Devig each sharp book
-                    sharp_fair_overs = []
-                    sharp_lines = []
-                    for sb in sharp_with_both:
-                        bk = books[sb]
-                        ov = american_to_implied(bk['over_odds'])
-                        un = american_to_implied(bk['under_odds'])
-                        fo, fu = devig_pair(ov, un)
-                        sharp_fair_overs.append(fo)
-                        sharp_lines.append(bk['line'])
-
-                    consensus_fair_over = sum(sharp_fair_overs) / len(sharp_fair_overs)
-                    consensus_line = sum(sharp_lines) / len(sharp_lines)
-
-                    t_over_imp = american_to_implied(tb['over_odds'])
-                    t_under_imp = american_to_implied(tb['under_odds'])
-                    t_juice_pct = round((t_over_imp + t_under_imp - 1.0) * 100, 1)
-
-                    # Devig target for gross edge
-                    t_fair_over, t_fair_under = devig_pair(t_over_imp, t_under_imp)
-
-                    same_line = abs(t_line - consensus_line) < 0.25
-
-                    if not same_line:
-                        # Different lines = apples to oranges, can't compare
-                        stats['diff_line_skipped'] += 1
-                        continue
-
-                    # === SAME LINE: devig comparison (the only reliable method) ===
-                    for side, target_p, t_fair_p, fair_p, odds in [
-                        ('OVER', t_over_imp, t_fair_over, consensus_fair_over, tb['over_odds']),
-                        ('UNDER', t_under_imp, t_fair_under, 1.0 - consensus_fair_over, tb['under_odds']),
-                    ]:
-                        net_edge = (fair_p - target_p) * 100
-                        gross_edge = (fair_p - t_fair_p) * 100
-
-                        if net_edge >= MIN_EDGE_NET:
-                            fair_odds = implied_to_american(fair_p)
-                            opportunities.append({
-                                'player': player, 'game': data['game'],
-                                'market': market_name,
-                                'book': BOOK_DISPLAY.get(target, target),
-                                'type': 'player_prop',
-                                'edge': round(net_edge, 1),
-                                'gross_edge': round(gross_edge, 1),
-                                'recommendation': f"{side} {t_line}",
-                                'odds': odds,
-                                'label1_name': f'{BOOK_DISPLAY.get(target, target)} Odds',
-                                'label1_value': format_american(odds),
-                                'label2_name': 'Fair Odds (no vig)',
-                                'label2_value': format_american(fair_odds),
-                                'label3_name': 'Net Edge',
-                                'label3_value': f"+{net_edge:.1f}%",
-                                'target_prob': round(target_p * 100, 1),
-                                'fair_prob': round(fair_p * 100, 1),
-                                'juice_display': f"{t_juice_pct}%",
-                            })
-                        elif net_edge > -3:
-                            near_misses.append((round(net_edge, 1), player,
-                                BOOK_DISPLAY.get(target, target), side, t_line))
-
-                else:
-                    # Not enough data for devig — skip
-                    # (need both over+under from 2+ sharp books AND target)
-                    stats['insufficient_data'] += 1
-
-    # Log stats
-    log_debug(f"    Players: {stats['players']} total, {stats['with_sharp']} w/2+ sharp, "
-              f"{stats['with_target']} w/target")
-    log_debug(f"    Analysis: {stats['devigged']} same-line devig, "
-              f"{stats['diff_line_skipped']} diff-line skipped, "
-              f"{stats['insufficient_data']} insufficient data")
-    log_debug(f"    Results: {len(opportunities)} +EV bets")
-
-    # Log top near misses (always helpful context)
-    if near_misses:
-        near_misses.sort(key=lambda x: x[0], reverse=True)
-        log_debug(f"    Closest near misses:")
-        for edge, name, book, side, line in near_misses[:5]:
-            log_debug(f"      {edge:+.1f}% {name} {side} {line} on {book}")
-
-    return opportunities
-
-
-# ============================================================
-# GAME MARKET ANALYSIS (robust outcome pairing)
+# GAME MARKET ANALYSIS — Any book vs consensus of all others
 # ============================================================
 
 def analyze_game_markets(games_data, market_name=""):
@@ -359,15 +217,11 @@ def analyze_game_markets(games_data, market_name=""):
         game_info = f"{game.get('away_team', '?')} @ {game.get('home_team', '?')}"
         games_checked += 1
 
-        # Collect outcomes per book, keyed by (name, point)
-        # {(name, point): {book: odds}}
-        outcome_odds = {}
-        # Also track paired outcomes per book for devigging
-        book_pairs = {}  # {book: {(name, point): odds}}
-
+        # Collect both sides per book: {book: {outcome_key: odds}}
+        book_pairs = {}
         for bookmaker in game.get('bookmakers', []):
-            book_name = bookmaker['key']
-            book_pairs[book_name] = {}
+            bk = bookmaker['key']
+            book_pairs[bk] = {}
             for market in bookmaker.get('markets', []):
                 for outcome in market.get('outcomes', []):
                     name = outcome.get('name', '')
@@ -376,149 +230,264 @@ def analyze_game_markets(games_data, market_name=""):
                     if not name or odds is None:
                         continue
                     key = (name, float(point) if point is not None else None)
-                    if key not in outcome_odds:
-                        outcome_odds[key] = {}
-                    outcome_odds[key][book_name] = odds
-                    book_pairs[book_name][key] = odds
+                    book_pairs[bk][key] = odds
 
-        # Find complementary pairs for devigging
-        # For each book, find the two sides of the market
-        # They share a market but have different outcome names
-        book_devigged = {}  # {book: {outcome_key: fair_prob}}
+        # Devig each book that has exactly 2 sides
+        book_devigged = {}  # {book: {key: fair_prob}}
         book_juice = {}
-
-        for book_name in list(SHARP_BOOKS) + list(TARGET_BOOKS):
-            pairs = book_pairs.get(book_name, {})
+        for bk, pairs in book_pairs.items():
             keys = list(pairs.keys())
             if len(keys) < 2:
                 continue
-
-            # Take first two outcomes as the pair
-            # (API returns the two sides of a 2-way market)
             k1, k2 = keys[0], keys[1]
             imp1 = american_to_implied(pairs[k1])
             imp2 = american_to_implied(pairs[k2])
-            juice = round((imp1 + imp2 - 1.0) * 100, 1)
-            book_juice[book_name] = juice
+            book_juice[bk] = round((imp1 + imp2 - 1.0) * 100, 1)
+            f1, f2 = devig_pair(imp1, imp2)
+            book_devigged[bk] = {k1: f1, k2: f2}
 
-            fair1, fair2 = devig_pair(imp1, imp2)
-            book_devigged[book_name] = {k1: fair1, k2: fair2}
+        if len(book_devigged) < 3:
+            continue  # Need at least 3 books for meaningful consensus
 
-        # Build consensus fair probs from sharp books
-        consensus_fair = {}
-        for key in outcome_odds:
-            fair_probs = []
-            for sb in SHARP_BOOKS:
-                if sb in book_devigged and key in book_devigged[sb]:
-                    fair_probs.append(book_devigged[sb][key])
-            if len(fair_probs) >= 2:
-                consensus_fair[key] = sum(fair_probs) / len(fair_probs)
+        # For each book, compute leave-one-out consensus and find outliers
+        all_keys = set()
+        for bk in book_devigged:
+            all_keys.update(book_devigged[bk].keys())
 
-        if not consensus_fair:
-            continue
-
-        # Compare target books
-        for target in TARGET_BOOKS:
-            if target not in book_pairs:
+        for eval_book in book_devigged:
+            if eval_book not in book_pairs:
                 continue
 
-            for key, odds in book_pairs[target].items():
-                if key not in consensus_fair:
+            for key in all_keys:
+                if key not in book_pairs[eval_book]:
+                    continue
+                if key not in book_devigged.get(eval_book, {}):
                     continue
 
-                fair_prob = consensus_fair[key]
-                target_implied = american_to_implied(odds)
+                # Leave-one-out consensus: average fair prob from all OTHER books
+                other_fairs = []
+                for other_bk in book_devigged:
+                    if other_bk == eval_book:
+                        continue
+                    if key in book_devigged[other_bk]:
+                        other_fairs.append(book_devigged[other_bk][key])
 
-                # Net edge (after juice)
-                net_edge = (fair_prob - target_implied) * 100
+                if len(other_fairs) < 2:
+                    continue
 
-                # Gross edge (target devigged vs consensus)
-                target_fair = None
-                if target in book_devigged and key in book_devigged[target]:
-                    target_fair = book_devigged[target][key]
-                gross_edge = (fair_prob - target_fair) * 100 if target_fair else net_edge
+                consensus_fair = sum(other_fairs) / len(other_fairs)
+                eval_implied = american_to_implied(book_pairs[eval_book][key])
+                eval_fair = book_devigged[eval_book][key]
 
-                juice_pct = book_juice.get(target, 0)
+                # Net edge: consensus fair - eval book's juiced implied
+                net_edge = (consensus_fair - eval_implied) * 100
+                # Gross edge: consensus fair - eval book's devigged fair
+                gross_edge = (consensus_fair - eval_fair) * 100
+
+                juice_pct = book_juice.get(eval_book, 0)
 
                 if net_edge < MIN_EDGE_NET:
                     if net_edge > -3:
                         name, point = key
-                        if point is not None:
-                            if 'Total' in market_name:
-                                dn = f"{name} {point}"
-                            else:
-                                dn = f"{name} {point:+.1f}"
-                        else:
-                            dn = f"{name} ML"
+                        dn = f"{name} {point:+.1f}" if point is not None else f"{name} ML"
                         near_misses.append((round(net_edge, 1), dn,
-                            BOOK_DISPLAY.get(target, target), game_info))
+                            BOOK_DISPLAY.get(eval_book, eval_book), game_info))
                     continue
 
-                # Build display name
                 name, point = key
                 if point is not None:
-                    if 'Total' in market_name:
-                        display_name = f"{name} {point}"
-                    else:
-                        display_name = f"{name} {point:+.1f}"
+                    display_name = f"{name} {point}" if 'Total' in market_name else f"{name} {point:+.1f}"
                 else:
                     display_name = f"{name} ML"
 
-                fair_american = implied_to_american(fair_prob)
+                fair_american = implied_to_american(consensus_fair)
+                odds = book_pairs[eval_book][key]
 
                 opportunities.append({
                     'player': display_name,
                     'game': game_info,
                     'market': market_name,
-                    'book': BOOK_DISPLAY.get(target, target),
+                    'book': BOOK_DISPLAY.get(eval_book, eval_book),
                     'type': 'game_market',
                     'edge': round(net_edge, 1),
                     'gross_edge': round(gross_edge, 1),
                     'recommendation': f"BET {display_name}",
                     'odds': odds,
-                    'label1_name': f'{BOOK_DISPLAY.get(target, target)} Odds',
+                    'label1_name': f'{BOOK_DISPLAY.get(eval_book, eval_book)} Odds',
                     'label1_value': format_american(odds),
-                    'label2_name': 'Fair Odds (no vig)',
+                    'label2_name': f'Fair Odds ({len(other_fairs)} books)',
                     'label2_value': format_american(fair_american),
                     'label3_name': 'Net Edge',
                     'label3_value': f"+{net_edge:.1f}%",
-                    'target_prob': round(target_implied * 100, 1),
-                    'fair_prob': round(fair_prob * 100, 1),
+                    'target_prob': round(eval_implied * 100, 1),
+                    'fair_prob': round(consensus_fair * 100, 1),
                     'juice_display': f"{juice_pct}%",
+                    'consensus_books': len(other_fairs),
                 })
 
-    log_debug(f"    Games: {games_checked}, Outcomes w/consensus: {len(consensus_fair)}, "
-              f"+EV bets: {len(opportunities)}")
+    log_debug(f"    {games_checked} games, {len(book_devigged)} books w/data, "
+              f"{len(opportunities)} +EV bets")
 
-    if near_misses and not opportunities:
+    if near_misses:
         near_misses.sort(key=lambda x: x[0], reverse=True)
-        log_debug(f"    Near misses (top 5):")
-        for edge, name, book, game in near_misses[:5]:
-            log_debug(f"      {edge:+.1f}% {name} on {book} ({game})")
+        log_debug(f"    Near misses:")
+        for edge, name, book, gm in near_misses[:5]:
+            log_debug(f"      {edge:+.1f}% {name} on {book} ({gm})")
 
     return opportunities
 
 
 # ============================================================
-# EVENT-LEVEL PLAYER PROPS (works for any sport)
+# PLAYER PROP ANALYSIS — Any book vs consensus of all others
 # ============================================================
 
-# Props to scan: points & rebounds only (highest pricing variance, best edge probability)
-# Assists/threes have less book coverage → rarely generate edges
-EVENT_PROP_MARKETS = [
-    ('basketball_nba', [
-        ('player_points', 'NBA Points'),
-        ('player_rebounds', 'NBA Rebounds'),
-    ], 8),   # max 8 events
-    ('basketball_ncaab', [
-        ('player_points', 'NCAAB Points'),
-        ('player_rebounds', 'NCAAB Rebounds'),
-    ], 8),   # max 8 events
-    # NHL props skipped — sparse book coverage, rarely have edges
-]
+def analyze_player_props(games_data, market_name=""):
+    if not games_data:
+        return []
 
-def fetch_event_props(sport, prop_markets, max_events=15):
-    """Fetch player props for a sport via event-level endpoints"""
+    opportunities = []
+    near_misses = []
+    stats = {'players': 0, 'same_line': 0, 'diff_line': 0, 'too_few_books': 0}
+
+    for game in games_data:
+        game_info = f"{game.get('away_team', '?')} @ {game.get('home_team', '?')}"
+
+        # Collect: {player: {book: {line, over_odds, under_odds}}}
+        players = {}
+        for bookmaker in game.get('bookmakers', []):
+            bk = bookmaker['key']
+            for market in bookmaker.get('markets', []):
+                for outcome in market.get('outcomes', []):
+                    player = outcome.get('description', '')
+                    if not player:
+                        continue
+                    line = outcome.get('point')
+                    odds = outcome.get('price')
+                    side = outcome.get('name', '').lower()
+                    if line is None or odds is None:
+                        continue
+                    if player not in players:
+                        players[player] = {'game': game_info, 'books': {}}
+                    if bk not in players[player]['books']:
+                        players[player]['books'][bk] = {'line': line}
+                    if 'over' in side:
+                        players[player]['books'][bk]['over_odds'] = odds
+                    elif 'under' in side:
+                        players[player]['books'][bk]['under_odds'] = odds
+                    players[player]['books'][bk]['line'] = line
+
+        for player, data in players.items():
+            stats['players'] += 1
+            books = data['books']
+
+            # Find books with both sides for devigging
+            books_with_both = {bk: bdata for bk, bdata in books.items()
+                               if 'over_odds' in bdata and 'under_odds' in bdata}
+
+            if len(books_with_both) < 3:
+                stats['too_few_books'] += 1
+                continue
+
+            # Group by line — only compare books on the same line
+            line_groups = {}
+            for bk, bdata in books_with_both.items():
+                line = bdata['line']
+                # Round to nearest 0.25 for grouping
+                rounded = round(line * 4) / 4
+                if rounded not in line_groups:
+                    line_groups[rounded] = {}
+                line_groups[rounded][bk] = bdata
+
+            for line_val, group_books in line_groups.items():
+                if len(group_books) < 3:
+                    stats['diff_line'] += 1
+                    continue
+
+                stats['same_line'] += 1
+
+                # Devig each book at this line
+                devigged = {}
+                juice_map = {}
+                for bk, bdata in group_books.items():
+                    ov = american_to_implied(bdata['over_odds'])
+                    un = american_to_implied(bdata['under_odds'])
+                    juice_map[bk] = round((ov + un - 1.0) * 100, 1)
+                    fo, fu = devig_pair(ov, un)
+                    devigged[bk] = {'over': fo, 'under': fu}
+
+                # For each book, leave-one-out consensus
+                for eval_book in group_books:
+                    other_over_fairs = []
+                    for other_bk in devigged:
+                        if other_bk == eval_book:
+                            continue
+                        other_over_fairs.append(devigged[other_bk]['over'])
+
+                    if len(other_over_fairs) < 2:
+                        continue
+
+                    consensus_over = sum(other_over_fairs) / len(other_over_fairs)
+                    consensus_under = 1.0 - consensus_over
+
+                    eb = group_books[eval_book]
+                    eval_over_imp = american_to_implied(eb['over_odds'])
+                    eval_under_imp = american_to_implied(eb['under_odds'])
+                    eval_over_fair = devigged[eval_book]['over']
+                    eval_under_fair = devigged[eval_book]['under']
+                    juice_pct = juice_map[eval_book]
+
+                    for side, eval_imp, eval_fair, consensus_fair, odds in [
+                        ('OVER', eval_over_imp, eval_over_fair, consensus_over, eb['over_odds']),
+                        ('UNDER', eval_under_imp, eval_under_fair, consensus_under, eb['under_odds']),
+                    ]:
+                        net_edge = (consensus_fair - eval_imp) * 100
+                        gross_edge = (consensus_fair - eval_fair) * 100
+
+                        if net_edge >= MIN_EDGE_NET:
+                            fair_odds = implied_to_american(consensus_fair)
+                            opportunities.append({
+                                'player': player,
+                                'game': data['game'],
+                                'market': market_name,
+                                'book': BOOK_DISPLAY.get(eval_book, eval_book),
+                                'type': 'player_prop',
+                                'edge': round(net_edge, 1),
+                                'gross_edge': round(gross_edge, 1),
+                                'recommendation': f"{side} {line_val}",
+                                'odds': odds,
+                                'label1_name': f'{BOOK_DISPLAY.get(eval_book, eval_book)} Odds',
+                                'label1_value': format_american(odds),
+                                'label2_name': f'Fair Odds ({len(other_over_fairs)} books)',
+                                'label2_value': format_american(fair_odds),
+                                'label3_name': 'Net Edge',
+                                'label3_value': f"+{net_edge:.1f}%",
+                                'target_prob': round(eval_imp * 100, 1),
+                                'fair_prob': round(consensus_fair * 100, 1),
+                                'juice_display': f"{juice_pct}%",
+                                'consensus_books': len(other_over_fairs),
+                            })
+                        elif net_edge > -3:
+                            near_misses.append((round(net_edge, 1), player,
+                                BOOK_DISPLAY.get(eval_book, eval_book), side, line_val))
+
+    log_debug(f"    Players: {stats['players']}, same-line groups: {stats['same_line']}, "
+              f"too few books: {stats['too_few_books']}, diff-line skipped: {stats['diff_line']}")
+    log_debug(f"    Results: {len(opportunities)} +EV bets")
+
+    if near_misses:
+        near_misses.sort(key=lambda x: x[0], reverse=True)
+        log_debug(f"    Near misses:")
+        for edge, name, book, side, line in near_misses[:5]:
+            log_debug(f"      {edge:+.1f}% {name} {side} {line} on {book}")
+
+    return opportunities
+
+
+# ============================================================
+# EVENT-LEVEL PROP SCANNING
+# ============================================================
+
+def fetch_event_props(sport, prop_markets, max_events=8):
     all_opps = []
     events = fetch_events(sport)
     if not events:
@@ -527,23 +496,24 @@ def fetch_event_props(sport, prop_markets, max_events=15):
     events_to_scan = events[:max_events]
     log_debug(f"  Scanning {len(events_to_scan)} of {len(events)} {sport} events")
 
-    events_with_data = 0
     for event in events_to_scan:
-        event_id = event.get('id')
+        eid = event.get('id')
         home = event.get('home_team', '?')
         away = event.get('away_team', '?')
 
         for prop_market, prop_name in prop_markets:
-            event_data = fetch_event_odds(sport, event_id, prop_market)
-            if event_data and event_data.get('bookmakers'):
-                events_with_data += 1
-                opps = analyze_player_props([event_data], prop_name)
+            if len(_dead_keys) >= len(API_KEYS):
+                log_debug("    All keys exhausted — stopping")
+                return all_opps
+            edata = fetch_event_odds(sport, eid, prop_market)
+            if edata and edata.get('bookmakers'):
+                opps = analyze_player_props([edata], prop_name)
                 if opps:
                     all_opps.extend(opps)
                     log_debug(f"    {away} @ {home} / {prop_name}: {len(opps)} +EV")
             time.sleep(0.3)
 
-    log_debug(f"  {sport} props: {events_with_data} event/markets had data, {len(all_opps)} +EV bets")
+    log_debug(f"  {sport} props: {len(all_opps)} +EV bets")
     return all_opps
 
 
@@ -555,26 +525,27 @@ def scan_markets():
     global _dead_keys
     state['scanning'] = True
     state['debug_info'] = []
-    _dead_keys = set()  # reset dead keys each scan
+    _dead_keys = set()
     all_opps = []
 
     log_debug("=== SCAN STARTED ===")
-    log_debug(f"Keys: {len(API_KEYS)} | Threshold: >{MIN_EDGE_NET}% net edge after juice")
+    log_debug(f"Books: {', '.join(BOOK_DISPLAY.get(b, b) for b in ALL_BOOKS)}")
+    log_debug(f"Strategy: any book vs leave-one-out consensus | Min edge: {MIN_EDGE_NET}%")
 
-    # 1. Player props via event-level endpoints
-    log_debug("--- Player Props (points & rebounds) ---")
-    for sport, prop_markets, max_ev in EVENT_PROP_MARKETS:
+    # 1. Player props (event-level)
+    log_debug("--- Player Props ---")
+    for sport, prop_markets, max_ev in PROP_MARKETS:
         if len(_dead_keys) >= len(API_KEYS):
-            log_debug("  All keys exhausted — stopping scan")
+            log_debug("  All keys exhausted — stopping")
             break
         opps = fetch_event_props(sport, prop_markets, max_events=max_ev)
         all_opps.extend(opps)
 
-    # 2. Moneylines only (spreads/totals rarely have edges after juice)
-    log_debug("--- Moneylines (bulk) ---")
-    for sport, market, name in GAME_LEVEL_MARKETS:
+    # 2. Moneylines (bulk)
+    log_debug("--- Moneylines ---")
+    for sport, market, name in GAME_MARKETS:
         if len(_dead_keys) >= len(API_KEYS):
-            log_debug("  All keys exhausted — stopping scan")
+            log_debug("  All keys exhausted — stopping")
             break
         games = fetch_odds(sport, market)
         if games:
@@ -589,8 +560,8 @@ def scan_markets():
     state['last_scan'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     state['scanning'] = False
 
-    active_keys = len(API_KEYS) - len(_dead_keys)
-    log_debug(f"=== SCAN COMPLETE: {len(all_opps)} +EV opportunities ({active_keys}/{len(API_KEYS)} keys still active) ===")
+    active = len(API_KEYS) - len(_dead_keys)
+    log_debug(f"=== DONE: {len(all_opps)} +EV bets ({active}/{len(API_KEYS)} keys active) ===")
 
 
 # ============================================================
@@ -620,13 +591,11 @@ def get_opportunities():
 
 @app.route('/api/key-status')
 def key_status():
-    """Check status of all API keys"""
     results = []
     for key in API_KEYS:
-        url = "https://api.the-odds-api.com/v4/sports"
-        params = {'apiKey': key}
         try:
-            r = requests.get(url, params=params, timeout=10)
+            r = requests.get("https://api.the-odds-api.com/v4/sports",
+                             params={'apiKey': key}, timeout=10)
             results.append({
                 'key': f'...{key[-6:]}',
                 'status': 'ok' if r.status_code == 200 else 'exhausted',
@@ -634,7 +603,7 @@ def key_status():
                 'used': r.headers.get('x-requests-used', '?'),
             })
         except Exception as e:
-            results.append({'key': f'...{key[-6:]}', 'status': 'error', 'message': str(e)[:60]})
+            results.append({'key': f'...{key[-6:]}', 'status': 'error'})
     return jsonify({'keys': results})
 
 if __name__ == '__main__':
