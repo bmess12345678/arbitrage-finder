@@ -198,7 +198,8 @@ def analyze_player_props(games_data, market_name=""):
 
     opportunities = []
     near_misses = []
-    stats = {'players': 0, 'with_sharp': 0, 'with_target': 0, 'devigged': 0, 'line_compared': 0}
+    stats = {'players': 0, 'with_sharp': 0, 'with_target': 0, 'devigged': 0,
+             'diff_line_skipped': 0, 'insufficient_data': 0}
 
     for game in games_data:
         game_info = f"{game.get('away_team', '?')} @ {game.get('home_team', '?')}"
@@ -281,136 +282,61 @@ def analyze_player_props(games_data, market_name=""):
 
                     same_line = abs(t_line - consensus_line) < 0.25
 
-                    if same_line:
-                        # Same line: compare probabilities directly
-                        for side, target_p, t_fair_p, fair_p, odds in [
-                            ('OVER', t_over_imp, t_fair_over, consensus_fair_over, tb['over_odds']),
-                            ('UNDER', t_under_imp, t_fair_under, 1.0 - consensus_fair_over, tb['under_odds']),
-                        ]:
-                            net_edge = (fair_p - target_p) * 100
-                            gross_edge = (fair_p - t_fair_p) * 100
+                    if not same_line:
+                        # Different lines = apples to oranges, can't compare
+                        stats['diff_line_skipped'] += 1
+                        continue
 
-                            if net_edge >= MIN_EDGE_NET:
-                                fair_odds = implied_to_american(fair_p)
-                                opportunities.append({
-                                    'player': player, 'game': data['game'],
-                                    'market': market_name,
-                                    'book': BOOK_DISPLAY.get(target, target),
-                                    'type': 'player_prop',
-                                    'edge': round(net_edge, 1),
-                                    'gross_edge': round(gross_edge, 1),
-                                    'recommendation': f"{side} {t_line}",
-                                    'odds': odds,
-                                    'label1_name': f'{BOOK_DISPLAY.get(target, target)} Odds',
-                                    'label1_value': format_american(odds),
-                                    'label2_name': 'Fair Odds (no vig)',
-                                    'label2_value': format_american(fair_odds),
-                                    'label3_name': 'Net Edge',
-                                    'label3_value': f"+{net_edge:.1f}%",
-                                    'target_prob': round(target_p * 100, 1),
-                                    'fair_prob': round(fair_p * 100, 1),
-                                    'juice_display': f"{t_juice_pct}%",
-                                })
-                            elif net_edge > -3:
-                                near_misses.append((round(net_edge, 1), player,
-                                    BOOK_DISPLAY.get(target, target), side, t_line))
-                    else:
-                        # Different line: use line diff minus actual juice
-                        diff = t_line - consensus_line
-                        line_edge = abs(diff / consensus_line * 100) if consensus_line != 0 else 0
-                        net_edge = line_edge - (t_juice_pct / 2.0)
+                    # === SAME LINE: devig comparison (the only reliable method) ===
+                    for side, target_p, t_fair_p, fair_p, odds in [
+                        ('OVER', t_over_imp, t_fair_over, consensus_fair_over, tb['over_odds']),
+                        ('UNDER', t_under_imp, t_fair_under, 1.0 - consensus_fair_over, tb['under_odds']),
+                    ]:
+                        net_edge = (fair_p - target_p) * 100
+                        gross_edge = (fair_p - t_fair_p) * 100
 
-                        if net_edge >= MIN_EDGE_NET and abs(diff) >= 0.5:
-                            side = 'UNDER' if diff > 0 else 'OVER'
-                            odds = tb.get('under_odds' if diff > 0 else 'over_odds', 0)
+                        if net_edge >= MIN_EDGE_NET:
+                            fair_odds = implied_to_american(fair_p)
                             opportunities.append({
                                 'player': player, 'game': data['game'],
                                 'market': market_name,
                                 'book': BOOK_DISPLAY.get(target, target),
                                 'type': 'player_prop',
                                 'edge': round(net_edge, 1),
-                                'gross_edge': round(line_edge, 1),
+                                'gross_edge': round(gross_edge, 1),
                                 'recommendation': f"{side} {t_line}",
                                 'odds': odds,
-                                'label1_name': f'{BOOK_DISPLAY.get(target, target)} Line',
-                                'label1_value': str(t_line),
-                                'label2_name': 'Sharp Consensus',
-                                'label2_value': str(round(consensus_line, 1)),
+                                'label1_name': f'{BOOK_DISPLAY.get(target, target)} Odds',
+                                'label1_value': format_american(odds),
+                                'label2_name': 'Fair Odds (no vig)',
+                                'label2_value': format_american(fair_odds),
                                 'label3_name': 'Net Edge',
                                 'label3_value': f"+{net_edge:.1f}%",
+                                'target_prob': round(target_p * 100, 1),
+                                'fair_prob': round(fair_p * 100, 1),
                                 'juice_display': f"{t_juice_pct}%",
                             })
-                        elif net_edge > -3 and abs(diff) >= 0.5:
-                            side = 'UNDER' if diff > 0 else 'OVER'
+                        elif net_edge > -3:
                             near_misses.append((round(net_edge, 1), player,
                                 BOOK_DISPLAY.get(target, target), side, t_line))
 
                 else:
-                    # === FALLBACK: Line comparison only ===
-                    # Use when we don't have both sides from enough books
-                    stats['line_compared'] += 1
-
-                    consensus_lines = [books[sb]['line'] for sb in sharp_available]
-                    consensus = sum(consensus_lines) / len(consensus_lines)
-
-                    diff = t_line - consensus
-                    if abs(diff) < 0.5:
-                        continue
-
-                    line_edge = abs(diff / consensus * 100) if consensus != 0 else 0
-
-                    # Estimate juice from available data
-                    if has_both_sides:
-                        t_over_imp = american_to_implied(tb['over_odds'])
-                        t_under_imp = american_to_implied(tb['under_odds'])
-                        t_juice_pct = round((t_over_imp + t_under_imp - 1.0) * 100, 1)
-                    else:
-                        t_juice_pct = 5.0  # conservative estimate
-
-                    net_edge = line_edge - (t_juice_pct / 2.0)
-
-                    if net_edge >= MIN_EDGE_NET:
-                        side = 'UNDER' if diff > 0 else 'OVER'
-                        # Use whichever odds we have
-                        if side == 'OVER' and 'over_odds' in tb:
-                            odds = tb['over_odds']
-                        elif side == 'UNDER' and 'under_odds' in tb:
-                            odds = tb['under_odds']
-                        else:
-                            odds = -110  # fallback display
-
-                        opportunities.append({
-                            'player': player, 'game': data['game'],
-                            'market': market_name,
-                            'book': BOOK_DISPLAY.get(target, target),
-                            'type': 'player_prop',
-                            'edge': round(net_edge, 1),
-                            'gross_edge': round(line_edge, 1),
-                            'recommendation': f"{side} {t_line}",
-                            'odds': odds,
-                            'label1_name': f'{BOOK_DISPLAY.get(target, target)} Line',
-                            'label1_value': str(t_line),
-                            'label2_name': 'Sharp Consensus',
-                            'label2_value': str(round(consensus, 1)),
-                            'label3_name': 'Net Edge',
-                            'label3_value': f"+{net_edge:.1f}%",
-                            'juice_display': f"~{t_juice_pct}%",
-                        })
-                    elif net_edge > -3:
-                        side = 'UNDER' if diff > 0 else 'OVER'
-                        near_misses.append((round(net_edge, 1), player,
-                            BOOK_DISPLAY.get(target, target), side, t_line))
+                    # Not enough data for devig — skip
+                    # (need both over+under from 2+ sharp books AND target)
+                    stats['insufficient_data'] += 1
 
     # Log stats
     log_debug(f"    Players: {stats['players']} total, {stats['with_sharp']} w/2+ sharp, "
               f"{stats['with_target']} w/target")
-    log_debug(f"    Analysis: {stats['devigged']} full devig, {stats['line_compared']} line-only")
+    log_debug(f"    Analysis: {stats['devigged']} same-line devig, "
+              f"{stats['diff_line_skipped']} diff-line skipped, "
+              f"{stats['insufficient_data']} insufficient data")
     log_debug(f"    Results: {len(opportunities)} +EV bets")
 
-    # Log top near misses
-    if near_misses and not opportunities:
+    # Log top near misses (always helpful context)
+    if near_misses:
         near_misses.sort(key=lambda x: x[0], reverse=True)
-        log_debug(f"    Near misses (top 5):")
+        log_debug(f"    Closest near misses:")
         for edge, name, book, side, line in near_misses[:5]:
             log_debug(f"      {edge:+.1f}% {name} {side} {line} on {book}")
 
