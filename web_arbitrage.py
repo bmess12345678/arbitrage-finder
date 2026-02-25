@@ -484,14 +484,236 @@ def analyze_player_props(games_data, market_name=""):
 
 
 # ============================================================
+# ARBITRAGE DETECTION — find guaranteed-profit cross-book pairs
+# ============================================================
+
+def find_game_arbs(games_data, market_name=""):
+    """Check every pair of books for arb: Side A on Book1 + Side B on Book2 < 100%"""
+    if not games_data:
+        return []
+
+    arbs = []
+
+    for game in games_data:
+        game_info = f"{game.get('away_team', '?')} @ {game.get('home_team', '?')}"
+
+        # Collect: {book: {outcome_key: odds}}
+        book_odds = {}
+        for bookmaker in game.get('bookmakers', []):
+            bk = bookmaker['key']
+            book_odds[bk] = {}
+            for market in bookmaker.get('markets', []):
+                for outcome in market.get('outcomes', []):
+                    name = outcome.get('name', '')
+                    odds = outcome.get('price')
+                    point = outcome.get('point')
+                    if not name or odds is None:
+                        continue
+                    key = (name, float(point) if point is not None else None)
+                    book_odds[bk][key] = odds
+
+        # Get all unique outcome keys
+        all_keys = set()
+        for bk in book_odds:
+            all_keys.update(book_odds[bk].keys())
+
+        # For 2-way markets, find the two sides
+        keys_list = sorted(all_keys, key=str)
+        if len(keys_list) < 2:
+            continue
+
+        # Pair them: for h2h it's (Team A, None) and (Team B, None)
+        side_a_key = keys_list[0]
+        side_b_key = keys_list[1]
+
+        # Check every pair of books: best Side A from any book + best Side B from any book
+        best_a_odds = None
+        best_a_book = None
+        best_b_odds = None
+        best_b_book = None
+
+        for bk in book_odds:
+            if side_a_key in book_odds[bk]:
+                odds_a = book_odds[bk][side_a_key]
+                if best_a_odds is None or american_to_implied(odds_a) < american_to_implied(best_a_odds):
+                    best_a_odds = odds_a
+                    best_a_book = bk
+            if side_b_key in book_odds[bk]:
+                odds_b = book_odds[bk][side_b_key]
+                if best_b_odds is None or american_to_implied(odds_b) < american_to_implied(best_b_odds):
+                    best_b_odds = odds_b
+                    best_b_book = bk
+
+        if best_a_odds is None or best_b_odds is None:
+            continue
+        if best_a_book == best_b_book:
+            continue  # Same book can't arb against itself
+
+        imp_a = american_to_implied(best_a_odds)
+        imp_b = american_to_implied(best_b_odds)
+        total = imp_a + imp_b
+
+        if total < 1.0:
+            profit_pct = round((1.0 - total) * 100, 2)
+            name_a, point_a = side_a_key
+            name_b, point_b = side_b_key
+            dn_a = f"{name_a} ML" if point_a is None else f"{name_a} {point_a:+.1f}"
+            dn_b = f"{name_b} ML" if point_b is None else f"{name_b} {point_b:+.1f}"
+
+            # Calculate optimal stakes for $100 total
+            stake_a = round(100 * (1 / imp_a) / (1/imp_a + 1/imp_b), 2)
+            stake_b = round(100 - stake_a, 2)
+
+            arbs.append({
+                'player': f"ARB: {dn_a} + {dn_b}",
+                'game': game_info,
+                'market': market_name,
+                'book': f"{BOOK_DISPLAY.get(best_a_book, best_a_book)} / {BOOK_DISPLAY.get(best_b_book, best_b_book)}",
+                'type': 'arbitrage',
+                'edge': profit_pct,
+                'gross_edge': profit_pct,
+                'recommendation': f"Guaranteed {profit_pct}% profit",
+                'odds': best_a_odds,
+                'label1_name': f'{BOOK_DISPLAY.get(best_a_book, best_a_book)}: {dn_a}',
+                'label1_value': format_american(best_a_odds),
+                'label2_name': f'{BOOK_DISPLAY.get(best_b_book, best_b_book)}: {dn_b}',
+                'label2_value': format_american(best_b_odds),
+                'label3_name': 'Guaranteed Profit',
+                'label3_value': f"+{profit_pct}%",
+                'target_prob': round(total * 100, 1),
+                'fair_prob': 100.0,
+                'juice_display': f"{round(total * 100, 1)}% combined",
+                'stake_a': stake_a,
+                'stake_b': stake_b,
+            })
+
+    if arbs:
+        log_debug(f"    🔥 {len(arbs)} ARBITRAGE opportunities found!")
+    return arbs
+
+
+def find_prop_arbs(games_data, market_name=""):
+    """Check every pair of books for prop arbs: Over on Book1 + Under on Book2 < 100%"""
+    if not games_data:
+        return []
+
+    arbs = []
+
+    for game in games_data:
+        game_info = f"{game.get('away_team', '?')} @ {game.get('home_team', '?')}"
+
+        # Collect: {player: {book: {line, over_odds, under_odds}}}
+        players = {}
+        for bookmaker in game.get('bookmakers', []):
+            bk = bookmaker['key']
+            for market in bookmaker.get('markets', []):
+                for outcome in market.get('outcomes', []):
+                    player = outcome.get('description', '')
+                    if not player:
+                        continue
+                    line = outcome.get('point')
+                    odds = outcome.get('price')
+                    side = outcome.get('name', '').lower()
+                    if line is None or odds is None:
+                        continue
+                    if player not in players:
+                        players[player] = {'game': game_info, 'books': {}}
+                    if bk not in players[player]['books']:
+                        players[player]['books'][bk] = {'line': line}
+                    if 'over' in side:
+                        players[player]['books'][bk]['over_odds'] = odds
+                    elif 'under' in side:
+                        players[player]['books'][bk]['under_odds'] = odds
+                    players[player]['books'][bk]['line'] = line
+
+        for player, data in players.items():
+            books = data['books']
+
+            # Group by same line
+            line_groups = {}
+            for bk, bdata in books.items():
+                if 'over_odds' not in bdata or 'under_odds' not in bdata:
+                    continue
+                line = bdata['line']
+                rounded = round(line * 4) / 4
+                if rounded not in line_groups:
+                    line_groups[rounded] = {}
+                line_groups[rounded][bk] = bdata
+
+            for line_val, group_books in line_groups.items():
+                if len(group_books) < 2:
+                    continue
+
+                # Find best Over odds and best Under odds across different books
+                best_over_odds = None
+                best_over_book = None
+                best_under_odds = None
+                best_under_book = None
+
+                for bk, bdata in group_books.items():
+                    ov_imp = american_to_implied(bdata['over_odds'])
+                    un_imp = american_to_implied(bdata['under_odds'])
+
+                    if best_over_odds is None or ov_imp < american_to_implied(best_over_odds):
+                        best_over_odds = bdata['over_odds']
+                        best_over_book = bk
+                    if best_under_odds is None or un_imp < american_to_implied(best_under_odds):
+                        best_under_odds = bdata['under_odds']
+                        best_under_book = bk
+
+                if best_over_book == best_under_book:
+                    continue
+                if best_over_odds is None or best_under_odds is None:
+                    continue
+
+                imp_over = american_to_implied(best_over_odds)
+                imp_under = american_to_implied(best_under_odds)
+                total = imp_over + imp_under
+
+                if total < 1.0:
+                    profit_pct = round((1.0 - total) * 100, 2)
+
+                    stake_over = round(100 * (1/imp_over) / (1/imp_over + 1/imp_under), 2)
+                    stake_under = round(100 - stake_over, 2)
+
+                    arbs.append({
+                        'player': f"ARB: {player}",
+                        'game': data['game'],
+                        'market': market_name,
+                        'book': f"{BOOK_DISPLAY.get(best_over_book, best_over_book)} / {BOOK_DISPLAY.get(best_under_book, best_under_book)}",
+                        'type': 'arbitrage',
+                        'edge': profit_pct,
+                        'gross_edge': profit_pct,
+                        'recommendation': f"OVER {line_val} + UNDER {line_val}",
+                        'odds': best_over_odds,
+                        'label1_name': f'{BOOK_DISPLAY.get(best_over_book, best_over_book)}: Over {line_val}',
+                        'label1_value': format_american(best_over_odds),
+                        'label2_name': f'{BOOK_DISPLAY.get(best_under_book, best_under_book)}: Under {line_val}',
+                        'label2_value': format_american(best_under_odds),
+                        'label3_name': 'Guaranteed Profit',
+                        'label3_value': f"+{profit_pct}%",
+                        'target_prob': round(total * 100, 1),
+                        'fair_prob': 100.0,
+                        'juice_display': f"{round(total * 100, 1)}% combined",
+                        'stake_over': stake_over,
+                        'stake_under': stake_under,
+                    })
+
+    if arbs:
+        log_debug(f"    🔥 {len(arbs)} PROP ARBITRAGE opportunities found!")
+    return arbs
+
+
+# ============================================================
 # EVENT-LEVEL PROP SCANNING
 # ============================================================
 
 def fetch_event_props(sport, prop_markets, max_events=8):
     all_opps = []
+    all_arbs = []
     events = fetch_events(sport)
     if not events:
-        return []
+        return [], []
 
     events_to_scan = events[:max_events]
     log_debug(f"  Scanning {len(events_to_scan)} of {len(events)} {sport} events")
@@ -504,17 +726,20 @@ def fetch_event_props(sport, prop_markets, max_events=8):
         for prop_market, prop_name in prop_markets:
             if len(_dead_keys) >= len(API_KEYS):
                 log_debug("    All keys exhausted — stopping")
-                return all_opps
+                return all_opps, all_arbs
             edata = fetch_event_odds(sport, eid, prop_market)
             if edata and edata.get('bookmakers'):
                 opps = analyze_player_props([edata], prop_name)
+                arbs = find_prop_arbs([edata], prop_name)
                 if opps:
                     all_opps.extend(opps)
                     log_debug(f"    {away} @ {home} / {prop_name}: {len(opps)} +EV")
+                if arbs:
+                    all_arbs.extend(arbs)
             time.sleep(0.3)
 
-    log_debug(f"  {sport} props: {len(all_opps)} +EV bets")
-    return all_opps
+    log_debug(f"  {sport} props: {len(all_opps)} +EV, {len(all_arbs)} arbs")
+    return all_opps, all_arbs
 
 
 # ============================================================
@@ -532,16 +757,17 @@ def scan_markets():
     log_debug(f"Books: {', '.join(BOOK_DISPLAY.get(b, b) for b in ALL_BOOKS)}")
     log_debug(f"Strategy: any book vs leave-one-out consensus | Min edge: {MIN_EDGE_NET}%")
 
-    # 1. Player props (event-level)
+    # 1. Player props (event-level) — +EV and arbs
     log_debug("--- Player Props ---")
     for sport, prop_markets, max_ev in PROP_MARKETS:
         if len(_dead_keys) >= len(API_KEYS):
             log_debug("  All keys exhausted — stopping")
             break
-        opps = fetch_event_props(sport, prop_markets, max_events=max_ev)
+        opps, arbs = fetch_event_props(sport, prop_markets, max_events=max_ev)
         all_opps.extend(opps)
+        all_opps.extend(arbs)
 
-    # 2. Moneylines (bulk)
+    # 2. Moneylines (bulk) — +EV and arbs
     log_debug("--- Moneylines ---")
     for sport, market, name in GAME_MARKETS:
         if len(_dead_keys) >= len(API_KEYS):
@@ -550,18 +776,23 @@ def scan_markets():
         games = fetch_odds(sport, market)
         if games:
             opps = analyze_game_markets(games, name)
+            arbs = find_game_arbs(games, name)
             if opps:
                 all_opps.extend(opps)
+            if arbs:
+                all_opps.extend(arbs)
         time.sleep(0.3)
 
-    all_opps.sort(key=lambda x: x['edge'], reverse=True)
+    all_opps.sort(key=lambda x: (-1 if x['type'] == 'arbitrage' else 0, -x['edge']))
 
     state['opportunities'] = all_opps
     state['last_scan'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     state['scanning'] = False
 
     active = len(API_KEYS) - len(_dead_keys)
-    log_debug(f"=== DONE: {len(all_opps)} +EV bets ({active}/{len(API_KEYS)} keys active) ===")
+    arb_count = len([o for o in all_opps if o['type'] == 'arbitrage'])
+    ev_count = len(all_opps) - arb_count
+    log_debug(f"=== DONE: {ev_count} +EV bets, {arb_count} arbitrage ({active}/{len(API_KEYS)} keys active) ===")
 
 
 # ============================================================
