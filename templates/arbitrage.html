@@ -92,6 +92,7 @@
         }
         .opp.strong { border-left-color: #ffa502; }
         .opp.elite { border-left-color: #ff4757; }
+        .opp.arb { border-left-color: #ffd700; background: #1a1e30; }
 
         .opp-top {
             display: flex; justify-content: space-between;
@@ -196,15 +197,15 @@
     <div class="stats">
         <div class="stat-card">
             <div class="stat-value" id="totalFound">0</div>
-            <div class="stat-label">Bets Found</div>
+            <div class="stat-label">+EV Bets</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value" id="totalArbs" style="color:#ffd700">0</div>
+            <div class="stat-label">Arbitrage</div>
         </div>
         <div class="stat-card">
             <div class="stat-value" id="totalStrong">0</div>
             <div class="stat-label">Strong (4%+)</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-value" id="totalElite">0</div>
-            <div class="stat-label">Elite (6%+)</div>
         </div>
     </div>
 
@@ -221,6 +222,7 @@
 
     <div class="filters" id="filters" style="display:none;">
         <button class="filter-btn active" onclick="setFilter('all', this)">All</button>
+        <button class="filter-btn" onclick="setFilter('arbitrage', this)">⚡ Arbitrage</button>
         <button class="filter-btn" onclick="setFilter('player_prop', this)">Player Props</button>
         <button class="filter-btn" onclick="setFilter('game_market', this)">Game Lines</button>
         <button class="filter-btn" onclick="setFilter('strong', this)">Strong 4%+</button>
@@ -285,11 +287,12 @@
                             btn.textContent = '🔍 Scan All Markets';
                             allOpps = data.opportunities || [];
 
-                            document.getElementById('totalFound').textContent = allOpps.length;
+                            const arbCount = allOpps.filter(o => o.type === 'arbitrage').length;
+                            const evCount = allOpps.length - arbCount;
+                            document.getElementById('totalFound').textContent = evCount;
+                            document.getElementById('totalArbs').textContent = arbCount;
                             document.getElementById('totalStrong').textContent =
                                 allOpps.filter(o => o.edge >= 4).length;
-                            document.getElementById('totalElite').textContent =
-                                allOpps.filter(o => o.edge >= 6).length;
                             document.getElementById('statusText').textContent =
                                 `Last scan: ${data.last_scan} · ${allOpps.length} +EV bets found`;
                             document.getElementById('filters').style.display =
@@ -312,7 +315,9 @@
             const container = document.getElementById('oppContainer');
             let opps = allOpps;
 
-            if (currentFilter === 'player_prop')
+            if (currentFilter === 'arbitrage')
+                opps = allOpps.filter(o => o.type === 'arbitrage');
+            else if (currentFilter === 'player_prop')
                 opps = allOpps.filter(o => o.type === 'player_prop');
             else if (currentFilter === 'game_market')
                 opps = allOpps.filter(o => o.type === 'game_market');
@@ -332,8 +337,9 @@
             }
 
             container.innerHTML = opps.map(opp => {
-                const cls = opp.edge >= 6 ? 'elite' : opp.edge >= 4 ? 'strong' : '';
-                const color = opp.edge >= 6 ? '#ff4757' : opp.edge >= 4 ? '#ffa502' : '#48bb78';
+                const isArb = opp.type === 'arbitrage';
+                const cls = isArb ? 'arb' : (opp.edge >= 6 ? 'elite' : opp.edge >= 4 ? 'strong' : '');
+                const color = isArb ? '#ffd700' : (opp.edge >= 6 ? '#ff4757' : opp.edge >= 4 ? '#ffa502' : '#48bb78');
                 const bookBadges = {
                     'FanDuel': 'badge-fd', 'DraftKings': 'badge-dk',
                     'BetMGM': 'badge-mgm', 'BetRivers': 'badge-br',
@@ -342,15 +348,18 @@
                 };
                 const bookBadge = bookBadges[opp.book] || 'badge-book';
 
-                // Gross edge display (if available, otherwise same as net)
+                // Gross edge display
                 const grossEdge = opp.gross_edge !== undefined ? opp.gross_edge : opp.edge;
-                const grossHtml = grossEdge !== opp.edge
+                const grossHtml = (!isArb && grossEdge !== opp.edge)
                     ? `<div class="opp-gross">Gross: +${grossEdge}%</div>`
                     : '';
 
-                // Fair value bar for game markets AND same-line props
+                // Edge label
+                const edgeLabel = isArb ? 'guaranteed' : 'net of vig';
+
+                // Fair value bar (not for arbs)
                 let fairBarHtml = '';
-                if (opp.target_prob && opp.fair_prob) {
+                if (!isArb && opp.target_prob && opp.fair_prob) {
                     const tp = opp.target_prob;
                     const fp = opp.fair_prob;
                     fairBarHtml = `
@@ -370,11 +379,28 @@
                         </div>`;
                 }
 
-                // Show actual juice if available
+                // Staking info for arbs
+                let stakeHtml = '';
+                if (isArb) {
+                    const sa = opp.stake_a || opp.stake_over || 50;
+                    const sb = opp.stake_b || opp.stake_under || 50;
+                    stakeHtml = `
+                        <div style="padding:8px 15px; font-size:0.8em; color:#ffd700; background:#12162a; margin:0 15px; border-radius:6px;">
+                            💰 Optimal stakes per $100: <strong>$${sa}</strong> on Leg 1 + <strong>$${sb}</strong> on Leg 2
+                        </div>`;
+                }
+
+                // Juice/combined display
                 let juiceHtml = '';
                 if (opp.juice_display) {
-                    juiceHtml = `<span style="color:#888; font-size:0.75em;"> · Vig: ${opp.juice_display}</span>`;
+                    const juiceLabel = isArb ? 'Combined implied' : 'Vig';
+                    juiceHtml = `<span style="color:#888; font-size:0.75em;"> · ${juiceLabel}: ${opp.juice_display}</span>`;
                 }
+
+                // Book badge - arbs show both books as text, not badge
+                const badgeHtml = isArb
+                    ? `<span class="badge badge-market">${opp.book}</span>`
+                    : `<span class="badge ${bookBadge}">${opp.book}</span>`;
 
                 return `
                     <div class="opp ${cls}">
@@ -383,14 +409,14 @@
                                 <div class="opp-player">${opp.player}</div>
                                 <div class="opp-game">${opp.game}</div>
                                 <div class="badges">
-                                    <span class="badge ${bookBadge}">${opp.book}</span>
+                                    ${badgeHtml}
                                     <span class="badge badge-market">${opp.market || ''}</span>
                                 </div>
                             </div>
                             <div class="opp-edge-box">
                                 ${grossHtml}
                                 <div class="opp-edge" style="color:${color}">+${opp.edge}%</div>
-                                <div class="opp-edge-label">net of vig</div>
+                                <div class="opp-edge-label">${edgeLabel}</div>
                             </div>
                         </div>
 
@@ -410,9 +436,10 @@
                         </div>
 
                         ${fairBarHtml}
+                        ${stakeHtml}
 
                         <div class="opp-rec">
-                            ⚡ ${opp.recommendation}
+                            ${isArb ? '💰' : '⚡'} ${opp.recommendation}
                             <div class="rec-sub">Odds: ${opp.odds > 0 ? '+' : ''}${opp.odds}${juiceHtml}</div>
                         </div>
                     </div>`;
