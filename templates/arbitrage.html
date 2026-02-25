@@ -126,7 +126,7 @@
         .badge-tsb { background: #cc0000; color: #fff; }
         .badge-hr { background: #e8510d; color: #fff; }
         .badge-bb { background: #7b3fa0; color: #fff; }
-        .badge-bp { background: #005da6; color: #fff; }
+
         .badge-book { background: #2d3748; color: #a0aec0; }
         .badge-market { background: #2d3748; color: #a0aec0; }
 
@@ -191,7 +191,7 @@
 
     <div class="header">
         <h1>🎯 Colorado +EV Finder</h1>
-        <div class="sub">8 CO-legal books · Any outlier vs consensus · Manual scan only</div>
+        <div class="sub">7 CO books + 3 sharp consensus · Any outlier vs consensus · Manual scan only</div>
     </div>
 
     <div class="stats">
@@ -237,9 +237,9 @@
     </div>
 
     <div class="explainer" id="explainer" style="display:none;">
-        <strong>How it works:</strong> All 8 CO-legal books are devigged to find their true fair odds.
-        Each book is compared against a <strong>leave-one-out consensus</strong> of the other books.
-        If one book's odds imply a lower probability than the rest agree on, that's a +EV outlier.
+        <strong>How it works:</strong> All 7 CO books + 3 sharp consensus books are devigged to find true fair odds.
+        Each CO book is compared against a <strong>weighted leave-one-out consensus</strong>, with
+        Pinnacle at 3x weight (sharpest book in the world — accepts unlimited sharp action).
         <strong>Gross</strong> = pricing disagreement before juice.
         <strong>Net</strong> = your real edge after paying the vig. Any positive net = profitable long-term.
     </div>
@@ -344,7 +344,7 @@
                     'FanDuel': 'badge-fd', 'DraftKings': 'badge-dk',
                     'BetMGM': 'badge-mgm', 'BetRivers': 'badge-br',
                     'theScore Bet': 'badge-tsb', 'Hard Rock': 'badge-hr',
-                    'Bally Bet': 'badge-bb', 'betPARX': 'badge-bp',
+                    'Bally Bet': 'badge-bb', 
                 };
                 const bookBadge = bookBadges[opp.book] || 'badge-book';
 
