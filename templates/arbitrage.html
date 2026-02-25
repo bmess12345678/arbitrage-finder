@@ -384,9 +384,11 @@
                 if (isArb) {
                     const sa = opp.stake_a || opp.stake_over || 50;
                     const sb = opp.stake_b || opp.stake_under || 50;
+                    const leg1 = opp.label1_name || 'Leg 1';
+                    const leg2 = opp.label2_name || 'Leg 2';
                     stakeHtml = `
                         <div style="padding:8px 15px; font-size:0.8em; color:#ffd700; background:#12162a; margin:0 15px; border-radius:6px;">
-                            💰 Optimal stakes per $100: <strong>$${sa}</strong> on Leg 1 + <strong>$${sb}</strong> on Leg 2
+                            💰 Optimal stakes per $100: <strong>$${sa}</strong> on ${leg1} + <strong>$${sb}</strong> on ${leg2}
                         </div>`;
                 }
 
