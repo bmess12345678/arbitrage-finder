@@ -47,11 +47,17 @@ def mark_key_dead(key):
 # COLORADO-LEGAL SPORTSBOOKS (available on The Odds API free tier)
 # ============================================================
 
-# All CO-legal books on the API (<=10 = 1 region cost per call)
-ALL_BOOKS = [
+# Colorado-legal books you can actually bet on
+CO_BETTABLE = [
     'fanduel', 'draftkings', 'betmgm', 'betrivers',
-    'espnbet', 'hardrockbet', 'ballybet', 'betparx',
+    'espnbet', 'hardrockbet', 'ballybet',
 ]
+
+# Non-CO books added purely for better fair odds consensus (≤10 total = 1 region cost)
+CONSENSUS_ONLY = ['pinnacle', 'bovada', 'betonlineag']
+
+# All books pulled from API (10 = 1 region, same API cost as before)
+ALL_BOOKS = CO_BETTABLE + CONSENSUS_ONLY
 
 BOOK_DISPLAY = {
     'fanduel': 'FanDuel',
@@ -61,7 +67,9 @@ BOOK_DISPLAY = {
     'espnbet': 'theScore Bet',
     'hardrockbet': 'Hard Rock',
     'ballybet': 'Bally Bet',
-    'betparx': 'betPARX',
+    'pinnacle': 'Pinnacle',
+    'bovada': 'Bovada',
+    'betonlineag': 'BetOnline',
 }
 
 # Markets to scan
@@ -83,6 +91,16 @@ PROP_MARKETS = [
 ]
 
 MIN_EDGE_NET = 0.1  # Show any +EV bet
+
+# Pinnacle gets 3x weight in consensus — sharpest lines due to
+# unlimited sharp action, lowest vig, independent pricing
+BOOK_WEIGHT = {
+    'pinnacle': 3,
+}
+# All other books default to weight 1
+
+def get_weight(book_key):
+    return BOOK_WEIGHT.get(book_key, 1)
 
 state = {
     'opportunities': [],
@@ -257,6 +275,8 @@ def analyze_game_markets(games_data, market_name=""):
         for eval_book in book_devigged:
             if eval_book not in book_pairs:
                 continue
+            if eval_book not in CO_BETTABLE:
+                continue  # Only show bets on CO-legal books
 
             for key in all_keys:
                 if key not in book_pairs[eval_book]:
@@ -264,18 +284,22 @@ def analyze_game_markets(games_data, market_name=""):
                 if key not in book_devigged.get(eval_book, {}):
                     continue
 
-                # Leave-one-out consensus: average fair prob from all OTHER books
+                # Leave-one-out weighted consensus: Pinnacle 3x, others 1x
                 other_fairs = []
+                other_weights = []
                 for other_bk in book_devigged:
                     if other_bk == eval_book:
                         continue
                     if key in book_devigged[other_bk]:
+                        w = get_weight(other_bk)
                         other_fairs.append(book_devigged[other_bk][key])
+                        other_weights.append(w)
 
                 if len(other_fairs) < 2:
                     continue
 
-                consensus_fair = sum(other_fairs) / len(other_fairs)
+                total_weight = sum(other_weights)
+                consensus_fair = sum(f * w for f, w in zip(other_fairs, other_weights)) / total_weight
                 eval_implied = american_to_implied(book_pairs[eval_book][key])
                 eval_fair = book_devigged[eval_book][key]
 
@@ -415,18 +439,24 @@ def analyze_player_props(games_data, market_name=""):
                     fo, fu = devig_pair(ov, un)
                     devigged[bk] = {'over': fo, 'under': fu}
 
-                # For each book, leave-one-out consensus
+                # For each book, leave-one-out weighted consensus
                 for eval_book in group_books:
+                    if eval_book not in CO_BETTABLE:
+                        continue  # Only show bets on CO-legal books
                     other_over_fairs = []
+                    other_weights = []
                     for other_bk in devigged:
                         if other_bk == eval_book:
                             continue
+                        w = get_weight(other_bk)
                         other_over_fairs.append(devigged[other_bk]['over'])
+                        other_weights.append(w)
 
                     if len(other_over_fairs) < 2:
                         continue
 
-                    consensus_over = sum(other_over_fairs) / len(other_over_fairs)
+                    total_weight = sum(other_weights)
+                    consensus_over = sum(f * w for f, w in zip(other_over_fairs, other_weights)) / total_weight
                     consensus_under = 1.0 - consensus_over
 
                     eb = group_books[eval_book]
@@ -533,6 +563,8 @@ def find_game_arbs(games_data, market_name=""):
         best_b_book = None
 
         for bk in book_odds:
+            if bk not in CO_BETTABLE:
+                continue  # Arbs only between CO-legal books
             if side_a_key in book_odds[bk]:
                 odds_a = book_odds[bk][side_a_key]
                 if best_a_odds is None or american_to_implied(odds_a) < american_to_implied(best_a_odds):
@@ -651,6 +683,8 @@ def find_prop_arbs(games_data, market_name=""):
                 best_under_book = None
 
                 for bk, bdata in group_books.items():
+                    if bk not in CO_BETTABLE:
+                        continue  # Arbs only between CO-legal books
                     ov_imp = american_to_implied(bdata['over_odds'])
                     un_imp = american_to_implied(bdata['under_odds'])
 
@@ -754,8 +788,9 @@ def scan_markets():
     all_opps = []
 
     log_debug("=== SCAN STARTED ===")
-    log_debug(f"Books: {', '.join(BOOK_DISPLAY.get(b, b) for b in ALL_BOOKS)}")
-    log_debug(f"Strategy: any book vs leave-one-out consensus | Min edge: {MIN_EDGE_NET}%")
+    log_debug(f"Bettable: {', '.join(BOOK_DISPLAY.get(b, b) for b in CO_BETTABLE)}")
+    log_debug(f"Consensus: + {', '.join(BOOK_DISPLAY.get(b, b) for b in CONSENSUS_ONLY)}")
+    log_debug(f"Strategy: CO book vs weighted consensus (Pinnacle 3x) | Min edge: {MIN_EDGE_NET}%")
 
     # 1. Player props (event-level) — +EV and arbs
     log_debug("--- Player Props ---")
