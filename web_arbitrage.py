@@ -593,7 +593,7 @@ def find_game_arbs(games_data, market_name=""):
             dn_b = f"{name_b} ML" if point_b is None else f"{name_b} {point_b:+.1f}"
 
             # Calculate optimal stakes for $100 total
-            stake_a = round(100 * (1 / imp_a) / (1/imp_a + 1/imp_b), 2)
+            stake_a = round(100 * imp_a / (imp_a + imp_b), 2)
             stake_b = round(100 - stake_a, 2)
 
             arbs.append({
@@ -707,7 +707,7 @@ def find_prop_arbs(games_data, market_name=""):
                 if total < 1.0:
                     profit_pct = round((1.0 - total) * 100, 2)
 
-                    stake_over = round(100 * (1/imp_over) / (1/imp_over + 1/imp_under), 2)
+                    stake_over = round(100 * imp_over / (imp_over + imp_under), 2)
                     stake_under = round(100 - stake_over, 2)
 
                     arbs.append({
