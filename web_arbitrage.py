@@ -143,6 +143,22 @@ def implied_to_american(prob):
     else:
         return ((1 - prob) / prob) * 100
 
+def quarter_kelly(fair_prob, american_odds):
+    """Quarter-Kelly bet size as fraction of bankroll.
+    fair_prob = consensus true probability, american_odds = what the book offers."""
+    if american_odds >= 0:
+        b = american_odds / 100.0  # net win per $1 risked
+    else:
+        b = 100.0 / abs(american_odds)
+    p = fair_prob
+    q = 1.0 - p
+    kelly = (b * p - q) / b
+    if kelly <= 0:
+        return 0
+    return kelly * 0.25  # quarter-Kelly
+
+DEFAULT_BANKROLL = 3000
+
 
 # ============================================================
 # FETCH FUNCTIONS
@@ -326,6 +342,7 @@ def analyze_game_markets(games_data, market_name=""):
 
                 fair_american = implied_to_american(consensus_fair)
                 odds = book_pairs[eval_book][key]
+                kf = quarter_kelly(consensus_fair, odds)
 
                 opportunities.append({
                     'player': display_name,
@@ -347,6 +364,7 @@ def analyze_game_markets(games_data, market_name=""):
                     'fair_prob': round(consensus_fair * 100, 1),
                     'juice_display': f"{juice_pct}%",
                     'consensus_books': len(other_fairs),
+                    'kelly_fraction': round(kf * 100, 2),
                 })
 
     log_debug(f"    {games_checked} games, {len(book_devigged)} books w/data, "
@@ -475,6 +493,7 @@ def analyze_player_props(games_data, market_name=""):
 
                         if net_edge >= MIN_EDGE_NET:
                             fair_odds = implied_to_american(consensus_fair)
+                            kf = quarter_kelly(consensus_fair, odds)
                             opportunities.append({
                                 'player': player,
                                 'game': data['game'],
@@ -495,6 +514,7 @@ def analyze_player_props(games_data, market_name=""):
                                 'fair_prob': round(consensus_fair * 100, 1),
                                 'juice_display': f"{juice_pct}%",
                                 'consensus_books': len(other_over_fairs),
+                                'kelly_fraction': round(kf * 100, 2),
                             })
                         elif net_edge > -3:
                             near_misses.append((round(net_edge, 1), player,
@@ -852,7 +872,8 @@ def get_opportunities():
         'last_scan': state['last_scan'],
         'total': len(state['opportunities']),
         'scanning': state['scanning'],
-        'debug': state.get('debug_info', [])
+        'debug': state.get('debug_info', []),
+        'bankroll': DEFAULT_BANKROLL,
     })
 
 @app.route('/api/key-status')
