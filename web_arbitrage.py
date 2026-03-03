@@ -4,7 +4,7 @@ Compares all CO-legal books against each other.
 Any book that's an outlier vs consensus = +EV bet.
 """
 
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, request
 import requests
 import time
 from datetime import datetime
@@ -12,6 +12,9 @@ import threading
 import os
 
 app = Flask(__name__)
+
+# Password gate — set SCAN_KEY env var on Render to protect API usage
+SCAN_KEY = os.environ.get('SCAN_KEY', '')
 
 # ============================================================
 # API KEY ROTATION
@@ -54,9 +57,10 @@ CO_BETTABLE = [
 ]
 
 # Non-CO books added purely for better fair odds consensus (≤10 total = 1 region cost)
+# NOTE: Caesars (williamhill_us) and Fanatics require paid API tier
 CONSENSUS_ONLY = ['pinnacle', 'bovada', 'betonlineag']
 
-# All books pulled from API (10 = 1 region, same API cost as before)
+# All books pulled from API (10 = 1 region, same API cost)
 ALL_BOOKS = CO_BETTABLE + CONSENSUS_ONLY
 
 BOOK_DISPLAY = {
@@ -249,6 +253,7 @@ def analyze_game_markets(games_data, market_name=""):
 
     for game in games_data:
         game_info = f"{game.get('away_team', '?')} @ {game.get('home_team', '?')}"
+        commence = game.get('commence_time', '')
         games_checked += 1
 
         # Collect both sides per book: {book: {outcome_key: odds}}
@@ -347,6 +352,7 @@ def analyze_game_markets(games_data, market_name=""):
                 opportunities.append({
                     'player': display_name,
                     'game': game_info,
+                    'commence': commence,
                     'market': market_name,
                     'book': BOOK_DISPLAY.get(eval_book, eval_book),
                     'type': 'game_market',
@@ -393,6 +399,7 @@ def analyze_player_props(games_data, market_name=""):
 
     for game in games_data:
         game_info = f"{game.get('away_team', '?')} @ {game.get('home_team', '?')}"
+        commence = game.get('commence_time', '')
 
         # Collect: {player: {book: {line, over_odds, under_odds}}}
         players = {}
@@ -409,7 +416,7 @@ def analyze_player_props(games_data, market_name=""):
                     if line is None or odds is None:
                         continue
                     if player not in players:
-                        players[player] = {'game': game_info, 'books': {}}
+                        players[player] = {'game': game_info, 'commence': commence, 'books': {}}
                     if bk not in players[player]['books']:
                         players[player]['books'][bk] = {'line': line}
                     if 'over' in side:
@@ -497,6 +504,7 @@ def analyze_player_props(games_data, market_name=""):
                             opportunities.append({
                                 'player': player,
                                 'game': data['game'],
+                                'commence': data.get('commence', ''),
                                 'market': market_name,
                                 'book': BOOK_DISPLAY.get(eval_book, eval_book),
                                 'type': 'player_prop',
@@ -546,6 +554,7 @@ def find_game_arbs(games_data, market_name=""):
 
     for game in games_data:
         game_info = f"{game.get('away_team', '?')} @ {game.get('home_team', '?')}"
+        commence = game.get('commence_time', '')
 
         # Collect: {book: {outcome_key: odds}}
         book_odds = {}
@@ -619,6 +628,7 @@ def find_game_arbs(games_data, market_name=""):
             arbs.append({
                 'player': f"ARB: {dn_a} + {dn_b}",
                 'game': game_info,
+                'commence': commence,
                 'market': market_name,
                 'book': f"{BOOK_DISPLAY.get(best_a_book, best_a_book)} / {BOOK_DISPLAY.get(best_b_book, best_b_book)}",
                 'type': 'arbitrage',
@@ -653,6 +663,7 @@ def find_prop_arbs(games_data, market_name=""):
 
     for game in games_data:
         game_info = f"{game.get('away_team', '?')} @ {game.get('home_team', '?')}"
+        commence = game.get('commence_time', '')
 
         # Collect: {player: {book: {line, over_odds, under_odds}}}
         players = {}
@@ -669,7 +680,7 @@ def find_prop_arbs(games_data, market_name=""):
                     if line is None or odds is None:
                         continue
                     if player not in players:
-                        players[player] = {'game': game_info, 'books': {}}
+                        players[player] = {'game': game_info, 'commence': commence, 'books': {}}
                     if bk not in players[player]['books']:
                         players[player]['books'][bk] = {'line': line}
                     if 'over' in side:
@@ -733,6 +744,7 @@ def find_prop_arbs(games_data, market_name=""):
                     arbs.append({
                         'player': f"ARB: {player}",
                         'game': data['game'],
+                        'commence': data.get('commence', ''),
                         'market': market_name,
                         'book': f"{BOOK_DISPLAY.get(best_over_book, best_over_book)} / {BOOK_DISPLAY.get(best_under_book, best_under_book)}",
                         'type': 'arbitrage',
@@ -860,6 +872,12 @@ def index():
 
 @app.route('/api/scan', methods=['POST'])
 def trigger_scan():
+    if SCAN_KEY:
+        provided = request.args.get('key', '')
+        if not provided and request.is_json:
+            provided = request.json.get('key', '')
+        if provided != SCAN_KEY:
+            return jsonify({'error': 'Invalid key'}), 403
     if state['scanning']:
         return jsonify({'error': 'Scan in progress'})
     threading.Thread(target=scan_markets, daemon=True).start()
