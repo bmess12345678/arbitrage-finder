@@ -126,6 +126,7 @@
         .badge-tsb { background: #cc0000; color: #fff; }
         .badge-hr { background: #e8510d; color: #fff; }
         .badge-bb { background: #7b3fa0; color: #fff; }
+        .badge-bp { background: #005da6; color: #fff; }
 
         .badge-book { background: #2d3748; color: #a0aec0; }
         .badge-market { background: #2d3748; color: #a0aec0; }
@@ -191,7 +192,7 @@
 
     <div class="header">
         <h1>🎯 Colorado +EV Finder</h1>
-        <div class="sub">7 CO books + 3 sharp consensus · Any outlier vs consensus · Manual scan only</div>
+        <div class="sub">7 CO books + Pinnacle/Bovada/BetOnline consensus · Any outlier = +EV · Manual scan only</div>
     </div>
 
     <div class="stats">
@@ -210,6 +211,12 @@
     </div>
 
     <div class="controls">
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
+            <label style="font-size:0.8em; color:#999; white-space:nowrap;">🔑 Key:</label>
+            <input type="password" id="scanKey" placeholder="Enter scan key"
+                style="flex:1; background:#16213e; border:1px solid #333; border-radius:6px;
+                       color:#fff; padding:8px 12px; font-size:0.9em; font-family:inherit; max-width:200px;">
+        </div>
         <button class="scan-btn" id="scanBtn" onclick="scan()">🔍 Scan All Markets</button>
         <div style="display:flex; align-items:center; gap:10px; margin-top:10px;">
             <label style="font-size:0.8em; color:#999; white-space:nowrap;">Bankroll: $</label>
@@ -260,6 +267,17 @@
             return parseFloat(document.getElementById('bankrollInput').value) || 3000;
         }
 
+        function formatGameTime(isoStr) {
+            if (!isoStr) return '';
+            try {
+                const d = new Date(isoStr);
+                return d.toLocaleString('en-US', {
+                    weekday: 'short', month: 'short', day: 'numeric',
+                    hour: 'numeric', minute: '2-digit', hour12: true
+                });
+            } catch { return ''; }
+        }
+
         // Re-render when bankroll changes
         document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('bankrollInput').addEventListener('input', renderOpps);
@@ -278,6 +296,7 @@
 
         async function scan() {
             if (scanning) return;
+            const key = document.getElementById('scanKey').value;
             scanning = true;
             const btn = document.getElementById('scanBtn');
             btn.disabled = true;
@@ -285,7 +304,14 @@
             document.getElementById('statusText').textContent = 'Scanning & devigging lines... 30-90 sec';
 
             try {
-                await fetch('/api/scan', { method: 'POST' });
+                const scanResp = await fetch(`/api/scan?key=${encodeURIComponent(key)}`, { method: 'POST' });
+                if (scanResp.status === 403) {
+                    scanning = false;
+                    btn.disabled = false;
+                    btn.textContent = '🔍 Scan All Markets';
+                    document.getElementById('statusText').textContent = '🔒 Invalid key — enter the correct scan key above';
+                    return;
+                }
                 const poll = setInterval(async () => {
                     try {
                         const resp = await fetch('/api/opportunities');
@@ -360,7 +386,7 @@
                     'FanDuel': 'badge-fd', 'DraftKings': 'badge-dk',
                     'BetMGM': 'badge-mgm', 'BetRivers': 'badge-br',
                     'theScore Bet': 'badge-tsb', 'Hard Rock': 'badge-hr',
-                    'Bally Bet': 'badge-bb', 
+                    'Bally Bet': 'badge-bb',
                 };
                 const bookBadge = bookBadges[opp.book] || 'badge-book';
 
@@ -425,7 +451,7 @@
                         <div class="opp-top">
                             <div>
                                 <div class="opp-player">${opp.player}</div>
-                                <div class="opp-game">${opp.game}</div>
+                                <div class="opp-game">${opp.game}${opp.commence ? ` · ${formatGameTime(opp.commence)}` : ''}</div>
                                 <div class="badges">
                                     ${badgeHtml}
                                     <span class="badge badge-market">${opp.market || ''}</span>
