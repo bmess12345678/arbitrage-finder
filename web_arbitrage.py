@@ -310,8 +310,12 @@ def fetch_kalshi_sports(log_fn=None):
 
             resp = requests.get(f"{KALSHI_API}/markets", params=params, timeout=20)
             if resp.status_code == 429:
-                log(f"  Kalshi API: rate limited on page {page+1}, using {total_fetched} markets so far")
-                break
+                log(f"  Kalshi API: rate limited on page {page+1}, waiting 3s...")
+                time.sleep(3)
+                resp = requests.get(f"{KALSHI_API}/markets", params=params, timeout=20)
+                if resp.status_code == 429:
+                    log(f"  Kalshi API: still rate limited, using {total_fetched} markets so far")
+                    break
             if resp.status_code != 200:
                 log(f"  Kalshi API: HTTP {resp.status_code}")
                 break
@@ -331,23 +335,31 @@ def fetch_kalshi_sports(log_fn=None):
                 if ',' in title:
                     continue
 
-                # Check for game outcome: "Team wins" / "Will Team win"
-                game_match = re.search(
-                    r'(?:will\s+)?(?:the\s+)?(.+?)\s+(?:wins?|beats?|defeats?)',
-                    title, re.IGNORECASE
-                )
-                if game_match:
-                    team_str = game_match.group(1).strip()
-                    yb = mkt.get('yes_bid', 0) or 0
-                    ya = mkt.get('yes_ask', 0) or 0
-                    if yb > 0 or ya > 0:
-                        mid = ((yb + ya) / 2 if yb > 0 and ya > 0 else yb or ya) / 100.0
-                        if 0.05 < mid < 0.95:
-                            for key, full_name in NBA_TEAMS.items():
-                                if key in team_str.lower():
-                                    result['games'][full_name] = mid
-                                    games_matched += 1
-                                    break
+                # Check for single-game outcome (not futures/championship)
+                futures_kws = ['championship', 'champion', 'title', 'finals', 'playoff',
+                               'season', 'mvp', 'award', 'division', 'conference']
+                is_futures = any(kw in title for kw in futures_kws)
+                if not is_futures:
+                    game_match = re.search(
+                        r'(?:will\s+)?(?:the\s+)?(.+?)\s+(?:wins?|beats?|defeats?)\s+(?:the\s+)?(.+)',
+                        title, re.IGNORECASE
+                    )
+                    if game_match:
+                        team_str = game_match.group(1).strip().lower()
+                        opponent_str = game_match.group(2).strip().lower()
+                        # Must have a recognizable opponent
+                        has_opponent = any(key in opponent_str for key in NBA_TEAMS.keys())
+                        if has_opponent:
+                            yb = mkt.get('yes_bid', 0) or 0
+                            ya = mkt.get('yes_ask', 0) or 0
+                            if yb > 0 or ya > 0:
+                                mid = ((yb + ya) / 2 if yb > 0 and ya > 0 else yb or ya) / 100.0
+                                if 0.05 < mid < 0.95:
+                                    for key, full_name in NBA_TEAMS.items():
+                                        if key in team_str:
+                                            result['games'][full_name] = mid
+                                            games_matched += 1
+                                            break
 
                 # Quick filter: look for player prop keywords
                 has_stat = any(kw in full for kw in ['points', 'rebounds', 'assists', 'three-pointer', '3-pointer'])
@@ -362,7 +374,7 @@ def fetch_kalshi_sports(log_fn=None):
             cursor = data.get('cursor', '')
             if not cursor:
                 break
-            time.sleep(0.3)  # Be nice to Kalshi's rate limiter
+            time.sleep(1.0)  # Respect Kalshi's rate limiter
 
         log(f"  Kalshi: scanned {total_fetched} open markets, {len(all_props)} look like player props")
 
@@ -500,19 +512,33 @@ def fetch_polymarket_sports(log_fn=None):
             if yes_price <= 0.02 or yes_price >= 0.98:
                 continue
 
-            # Check if it's a game outcome: "Will [Team] win/beat..."
+            # Check if it's a SINGLE-GAME outcome (not futures/championship)
+            # Futures: "Will the Thunder win the championship/title/NBA"
+            # Games: "Will the Thunder beat the Knicks" / "Thunder vs Knicks"
+            is_futures = any(kw in q_low for kw in [
+                'championship', 'champion', 'title', 'finals', 'playoff',
+                'season', 'mvp', 'award', 'division', 'conference',
+                'win the nba', 'win the nfl', 'win the nhl',
+            ])
+            if is_futures:
+                continue
+
+            # Game outcome needs to mention an opponent or "game"/"tonight"/"vs"
             game_match = re.search(
-                r'(?:will|do)\s+(?:the\s+)?(.+?)\s+(?:win|beat|defeat)',
+                r'(?:will|do)\s+(?:the\s+)?(.+?)\s+(?:win|beat|defeat)\s+(?:the\s+)?(.+?)[\?\.]?$',
                 q_low, re.IGNORECASE
             )
             if game_match:
                 team_str = game_match.group(1).strip()
-                # Try to match to an NBA team
-                for key, full_name in NBA_TEAMS.items():
-                    if key in team_str:
-                        result['games'][full_name] = yes_price
-                        sports_count += 1
-                        break
+                opponent_str = game_match.group(2).strip()
+                # Must have an actual opponent (not "the championship")
+                has_opponent = any(key in opponent_str for key in NBA_TEAMS.keys())
+                if has_opponent:
+                    for key, full_name in NBA_TEAMS.items():
+                        if key in team_str:
+                            result['games'][full_name] = yes_price
+                            sports_count += 1
+                            break
                 continue
 
             # Check if it's a player prop: "Will [Player] score X+ points"
@@ -1000,9 +1026,9 @@ def analyze_player_props(games_data, market_name="", kalshi_props=None, poly_pro
                         if other_bk in group_books:
                             raw_over = format_american(group_books[other_bk].get('over_odds', 0))
                             raw_under = format_american(group_books[other_bk].get('under_odds', 0))
-                        elif other_bk == 'kalshi':
-                            raw_over = f"{devigged['kalshi']['over']*100:.0f}¢"
-                            raw_under = f"{devigged['kalshi']['under']*100:.0f}¢"
+                        elif other_bk in ('kalshi', 'polymarket'):
+                            raw_over = f"{devigged[other_bk]['over']*100:.0f}¢"
+                            raw_under = f"{devigged[other_bk]['under']*100:.0f}¢"
                         else:
                             raw_over = '—'
                             raw_under = '—'
