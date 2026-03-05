@@ -134,12 +134,12 @@
         .badge-poly { background: #7b61ff; color: #fff; }
         .consensus-tip { position: relative; cursor: help; }
         .consensus-tip .tip-content {
-            display: none; position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
+            display: none; position: fixed; z-index: 1000; min-width: 280px;
             background: #1a2340; border: 1px solid #3a4a6a; border-radius: 8px; padding: 10px 14px;
-            font-size: 0.75em; white-space: nowrap; z-index: 100; min-width: 260px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.5); margin-bottom: 8px;
+            font-size: 0.75em; white-space: nowrap;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+            pointer-events: none;
         }
-        .consensus-tip:hover .tip-content { display: block; }
         .tip-row { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; border-bottom: 1px solid #1e2d50; }
         .tip-row:last-child { border-bottom: none; }
         .tip-book { color: #8899aa; min-width: 80px; }
@@ -147,10 +147,6 @@
         .tip-fair { color: #4fc3f7; font-family: monospace; }
         .tip-wt { color: #666; font-size: 0.9em; }
         .tip-header { color: #556; font-size: 0.85em; padding-bottom: 4px; margin-bottom: 4px; border-bottom: 1px solid #2a3a5a; display: flex; justify-content: space-between; gap: 12px; }
-        .consensus-tip .tip-content::after {
-            content: ''; position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
-            border: 6px solid transparent; border-top-color: #3a4a6a;
-        }
 
         .badge-book { background: #2d3748; color: #a0aec0; }
         .badge-market { background: #2d3748; color: #a0aec0; }
@@ -346,6 +342,24 @@
         // Re-render when bankroll changes
         document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('bankrollInput').addEventListener('input', renderOpps);
+
+            // Tooltip positioning for consensus detail
+            document.addEventListener('mouseover', (e) => {
+                const tip = e.target.closest('.consensus-tip');
+                if (!tip) return;
+                const content = tip.querySelector('.tip-content');
+                if (!content) return;
+                const rect = tip.getBoundingClientRect();
+                content.style.display = 'block';
+                content.style.left = Math.min(rect.left, window.innerWidth - 300) + 'px';
+                content.style.top = (rect.bottom + 8) + 'px';
+            });
+            document.addEventListener('mouseout', (e) => {
+                const tip = e.target.closest('.consensus-tip');
+                if (!tip) return;
+                const content = tip.querySelector('.tip-content');
+                if (content) content.style.display = 'none';
+            });
         });
 
         function toggleDebug() {
