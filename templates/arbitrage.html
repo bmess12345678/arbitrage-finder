@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Colorado +EV Finder</title>
+    <title>+EV Finder</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -93,6 +93,9 @@
         .opp.strong { border-left-color: #ffa502; }
         .opp.elite { border-left-color: #ff4757; }
         .opp.arb { border-left-color: #ffd700; background: #1a1e30; }
+        .opp.cross { border-left-color: #e040fb; background: #1a1430; }
+        .opp.weather { border-left-color: #00bcd4; background: #0a1a2a; }
+        .opp.econ { border-left-color: #ff9800; background: #1a1810; }
 
         .opp-top {
             display: flex; justify-content: space-between;
@@ -128,6 +131,26 @@
         .badge-bb { background: #7b3fa0; color: #fff; }
         .badge-bp { background: #005da6; color: #fff; }
         .badge-kalshi { background: #00d4aa; color: #1a1a1a; }
+        .badge-poly { background: #7b61ff; color: #fff; }
+        .consensus-tip { position: relative; cursor: help; }
+        .consensus-tip .tip-content {
+            display: none; position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
+            background: #1a2340; border: 1px solid #3a4a6a; border-radius: 8px; padding: 10px 14px;
+            font-size: 0.75em; white-space: nowrap; z-index: 100; min-width: 260px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5); margin-bottom: 8px;
+        }
+        .consensus-tip:hover .tip-content { display: block; }
+        .tip-row { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; border-bottom: 1px solid #1e2d50; }
+        .tip-row:last-child { border-bottom: none; }
+        .tip-book { color: #8899aa; min-width: 80px; }
+        .tip-odds { color: #e0e0e0; font-family: monospace; }
+        .tip-fair { color: #4fc3f7; font-family: monospace; }
+        .tip-wt { color: #666; font-size: 0.9em; }
+        .tip-header { color: #556; font-size: 0.85em; padding-bottom: 4px; margin-bottom: 4px; border-bottom: 1px solid #2a3a5a; display: flex; justify-content: space-between; gap: 12px; }
+        .consensus-tip .tip-content::after {
+            content: ''; position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
+            border: 6px solid transparent; border-top-color: #3a4a6a;
+        }
 
         .badge-book { background: #2d3748; color: #a0aec0; }
         .badge-market { background: #2d3748; color: #a0aec0; }
@@ -192,22 +215,30 @@
 <body>
 
     <div class="header">
-        <h1>🎯 Colorado +EV Finder</h1>
-        <div class="sub">7 CO books + Kalshi + Pinnacle/Bovada/BetOnline · Any outlier = +EV · Manual scan only</div>
+        <h1>🎯 +EV Finder</h1>
+        <div class="sub">Sports · Kalshi vs Polymarket · Weather · Economic | Manual scan only</div>
     </div>
 
     <div class="stats">
         <div class="stat-card">
-            <div class="stat-value" id="totalFound">0</div>
-            <div class="stat-label">+EV Bets</div>
+            <div class="stat-value" id="totalSports">0</div>
+            <div class="stat-label">Sports</div>
         </div>
         <div class="stat-card">
             <div class="stat-value" id="totalArbs" style="color:#ffd700">0</div>
-            <div class="stat-label">Arbitrage</div>
+            <div class="stat-label">Arb</div>
         </div>
         <div class="stat-card">
-            <div class="stat-value" id="totalStrong">0</div>
-            <div class="stat-label">Strong (4%+)</div>
+            <div class="stat-value" id="totalCross" style="color:#e040fb">0</div>
+            <div class="stat-label">K vs P</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value" id="totalWeather" style="color:#00bcd4">0</div>
+            <div class="stat-label">Weather</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-value" id="totalEcon" style="color:#ff9800">0</div>
+            <div class="stat-label">Econ</div>
         </div>
     </div>
 
@@ -237,9 +268,11 @@
 
     <div class="filters" id="filters" style="display:none;">
         <button class="filter-btn active" onclick="setFilter('all', this)">All</button>
-        <button class="filter-btn" onclick="setFilter('arbitrage', this)">⚡ Arbitrage</button>
-        <button class="filter-btn" onclick="setFilter('player_prop', this)">Player Props</button>
-        <button class="filter-btn" onclick="setFilter('game_market', this)">Game Lines</button>
+        <button class="filter-btn" onclick="setFilter('sports', this)">🏀 Sports</button>
+        <button class="filter-btn" onclick="setFilter('arbitrage', this)">⚡ Arb</button>
+        <button class="filter-btn" onclick="setFilter('cross_exchange', this)">🔄 K vs P</button>
+        <button class="filter-btn" onclick="setFilter('weather', this)">🌡️ Weather</button>
+        <button class="filter-btn" onclick="setFilter('economic', this)">📊 Econ</button>
         <button class="filter-btn" onclick="setFilter('strong', this)">Strong 4%+</button>
     </div>
 
@@ -277,6 +310,37 @@
                     hour: 'numeric', minute: '2-digit', hour12: true
                 });
             } catch { return ''; }
+        }
+
+        function buildTooltip(opp) {
+            if (!opp.consensus_detail || !opp.consensus_detail.length) return '';
+            const d = opp.consensus_detail;
+            const isProp = opp.type === 'player_prop';
+            let rows = '';
+            // Sort by weight desc, then by book name
+            d.sort((a, b) => (b.weight || 1) - (a.weight || 1) || (a.book || '').localeCompare(b.book || ''));
+            for (const b of d) {
+                const wt = b.weight > 1 ? `<span class="tip-wt">(${b.weight}x)</span>` : '';
+                if (isProp) {
+                    rows += `<div class="tip-row">
+                        <span class="tip-book">${b.book} ${wt}</span>
+                        <span class="tip-odds">${b.raw_over || '—'}</span>
+                        <span class="tip-fair">${b.over_odds || '—'}</span>
+                    </div>`;
+                } else {
+                    rows += `<div class="tip-row">
+                        <span class="tip-book">${b.book} ${wt}</span>
+                        <span class="tip-odds">${b.raw_odds || '—'}</span>
+                        <span class="tip-fair">${b.fair_odds || '—'}</span>
+                    </div>`;
+                }
+            }
+            return `<div class="tip-content">
+                <div class="tip-header">
+                    <span>Book</span><span>Posted</span><span>Fair</span>
+                </div>
+                ${rows}
+            </div>`;
         }
 
         // Re-render when bankroll changes
@@ -331,11 +395,15 @@
                             allOpps = data.opportunities || [];
 
                             const arbCount = allOpps.filter(o => o.type === 'arbitrage').length;
-                            const evCount = allOpps.length - arbCount;
-                            document.getElementById('totalFound').textContent = evCount;
+                            const crossCount = allOpps.filter(o => o.type === 'cross_exchange').length;
+                            const weatherCount = allOpps.filter(o => o.type === 'weather').length;
+                            const econCount = allOpps.filter(o => o.type === 'economic').length;
+                            const sportsCount = allOpps.length - arbCount - crossCount - weatherCount - econCount;
+                            document.getElementById('totalSports').textContent = sportsCount;
                             document.getElementById('totalArbs').textContent = arbCount;
-                            document.getElementById('totalStrong').textContent =
-                                allOpps.filter(o => o.edge >= 4).length;
+                            document.getElementById('totalCross').textContent = crossCount;
+                            document.getElementById('totalWeather').textContent = weatherCount;
+                            document.getElementById('totalEcon').textContent = econCount;
                             document.getElementById('statusText').textContent =
                                 `Last scan: ${data.last_scan} · ${allOpps.length} +EV bets found`;
                             document.getElementById('filters').style.display =
@@ -360,10 +428,14 @@
 
             if (currentFilter === 'arbitrage')
                 opps = allOpps.filter(o => o.type === 'arbitrage');
-            else if (currentFilter === 'player_prop')
-                opps = allOpps.filter(o => o.type === 'player_prop');
-            else if (currentFilter === 'game_market')
-                opps = allOpps.filter(o => o.type === 'game_market');
+            else if (currentFilter === 'sports')
+                opps = allOpps.filter(o => ['player_prop', 'game_market'].includes(o.type));
+            else if (currentFilter === 'cross_exchange')
+                opps = allOpps.filter(o => o.type === 'cross_exchange');
+            else if (currentFilter === 'weather')
+                opps = allOpps.filter(o => o.type === 'weather');
+            else if (currentFilter === 'economic')
+                opps = allOpps.filter(o => o.type === 'economic');
             else if (currentFilter === 'strong')
                 opps = allOpps.filter(o => o.edge >= 4);
 
@@ -381,13 +453,18 @@
 
             container.innerHTML = opps.map(opp => {
                 const isArb = opp.type === 'arbitrage';
-                const cls = isArb ? 'arb' : (opp.edge >= 6 ? 'elite' : opp.edge >= 4 ? 'strong' : '');
-                const color = isArb ? '#ffd700' : (opp.edge >= 6 ? '#ff4757' : opp.edge >= 4 ? '#ffa502' : '#48bb78');
+                const isCross = opp.type === 'cross_exchange';
+                const isWeather = opp.type === 'weather';
+                const isEcon = opp.type === 'economic';
+                const isNonSports = isCross || isWeather || isEcon;
+                const cls = isArb ? 'arb' : isCross ? 'cross' : isWeather ? 'weather' : isEcon ? 'econ' : (opp.edge >= 6 ? 'elite' : opp.edge >= 4 ? 'strong' : '');
+                const color = isArb ? '#ffd700' : isCross ? '#e040fb' : isWeather ? '#00bcd4' : isEcon ? '#ff9800' : (opp.edge >= 6 ? '#ff4757' : opp.edge >= 4 ? '#ffa502' : '#48bb78');
+                const typeIcon = isArb ? '💰' : isCross ? '🔄' : isWeather ? '🌡️' : isEcon ? '📊' : '⚡';
                 const bookBadges = {
                     'FanDuel': 'badge-fd', 'DraftKings': 'badge-dk',
                     'BetMGM': 'badge-mgm', 'BetRivers': 'badge-br',
                     'theScore Bet': 'badge-tsb', 'Hard Rock': 'badge-hr',
-                    'Bally Bet': 'badge-bb', 'Kalshi': 'badge-kalshi',
+                    'Bally Bet': 'badge-bb', 'Kalshi': 'badge-kalshi', 'Polymarket': 'badge-poly',
                 };
                 const bookBadge = bookBadges[opp.book] || 'badge-book';
 
@@ -470,9 +547,10 @@
                                 <div class="data-label">${opp.label1_name || ''}</div>
                                 <div class="data-value">${opp.label1_value || '—'}</div>
                             </div>
-                            <div class="data-cell">
-                                <div class="data-label">${opp.label2_name || ''}</div>
+                            <div class="data-cell${!isArb && opp.consensus_detail ? ' consensus-tip' : ''}">
+                                <div class="data-label">${opp.label2_name || ''}${!isArb && opp.consensus_detail ? ' ⓘ' : ''}</div>
                                 <div class="data-value">${opp.label2_value || '—'}</div>
+                                ${!isArb && opp.consensus_detail ? buildTooltip(opp) : ''}
                             </div>
                             <div class="data-cell">
                                 <div class="data-label">${opp.label3_name || ''}</div>
@@ -484,7 +562,7 @@
                         ${stakeHtml}
 
                         <div class="opp-rec">
-                            ${isArb ? '💰' : '⚡'} ${opp.recommendation}
+                            ${typeIcon} ${opp.recommendation}
                             <div class="rec-sub">Odds: ${opp.odds > 0 ? '+' : ''}${opp.odds}${juiceHtml}</div>
                             ${!isArb && opp.kelly_fraction ? `<div style="margin-top:4px; color:#ffd700; font-size:0.85em; font-weight:600;">
                                 Suggested bet: $${Math.round(getBankroll() * opp.kelly_fraction / 100)}
