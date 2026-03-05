@@ -6,6 +6,7 @@ Any book that's an outlier vs consensus = +EV bet.
 
 from flask import Flask, render_template, jsonify, request
 import requests
+import re
 import time
 from datetime import datetime
 import threading
@@ -74,6 +75,7 @@ BOOK_DISPLAY = {
     'pinnacle': 'Pinnacle',
     'bovada': 'Bovada',
     'betonlineag': 'BetOnline',
+    'kalshi': 'Kalshi',
 }
 
 # Markets to scan
@@ -100,11 +102,192 @@ MIN_EDGE_NET = 0.1  # Show any +EV bet
 # unlimited sharp action, lowest vig, independent pricing
 BOOK_WEIGHT = {
     'pinnacle': 3,
+    'kalshi': 3,   # Exchange-priced, no vig — very sharp signal
 }
 # All other books default to weight 1
 
 def get_weight(book_key):
     return BOOK_WEIGHT.get(book_key, 1)
+
+# ============================================================
+# KALSHI INTEGRATION — Free public API, no auth, zero Odds API cost
+# ============================================================
+
+KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
+
+def normalize_player_name(name):
+    """Normalize for matching: lowercase, strip suffixes."""
+    name = ' '.join(name.strip().split()).lower()
+    name = re.sub(r'\s+(jr\.?|sr\.?|ii+|iv|v)$', '', name)
+    return name
+
+def kalshi_stat_to_market(stat_str):
+    """Map Kalshi stat words to our Odds API market keys."""
+    s = stat_str.lower()
+    if 'point' in s:
+        return 'player_points'
+    elif 'rebound' in s:
+        return 'player_rebounds'
+    elif 'assist' in s:
+        return 'player_assists'
+    elif 'three' in s or '3-pointer' in s or '3pt' in s:
+        return 'player_threes'
+    return None
+
+def parse_kalshi_prop(market):
+    """Parse a Kalshi market dict → (player, market_type, line, over_prob) or None."""
+    title = market.get('title', '')
+    subtitle = market.get('subtitle', '') or ''
+    yes_sub = market.get('yes_sub_title', '') or ''
+
+    # Fair probability from mid-market price
+    yes_bid = market.get('yes_bid', 0) or 0
+    yes_ask = market.get('yes_ask', 0) or 0
+
+    if yes_bid > 0 and yes_ask > 0:
+        mid_prob = ((yes_bid + yes_ask) / 2) / 100.0
+    elif yes_bid > 0:
+        mid_prob = yes_bid / 100.0
+    elif yes_ask > 0:
+        mid_prob = yes_ask / 100.0
+    else:
+        return None
+
+    if mid_prob <= 0.02 or mid_prob >= 0.98:
+        return None
+
+    full_text = f"{title} {subtitle} {yes_sub}"
+
+    # Pattern 1: "Will [Player] score/have/record [X]+ [stat]"
+    m = re.search(
+        r'(?:Will\s+)?(.+?)\s+(?:score|have|record|get|make)\s+(\d+(?:\.\d+)?)\+?\s*'
+        r'(points?|rebounds?|assists?|three[- ]?pointers?|3[- ]?pointers?|threes?)',
+        full_text, re.IGNORECASE
+    )
+    if m:
+        player = m.group(1).strip().rstrip('?')
+        line_raw = float(m.group(2))
+        stat = m.group(3)
+        # "15+ points" means >= 15 = Over 14.5
+        if line_raw == int(line_raw) and '.' not in m.group(2):
+            line = line_raw - 0.5
+        else:
+            line = line_raw
+        mkt = kalshi_stat_to_market(stat)
+        if mkt:
+            return (player, mkt, line, mid_prob)
+
+    # Pattern 2: "[Player] Over [X] [stat]"
+    m = re.search(
+        r'(.+?)\s+[Oo]ver\s+(\d+(?:\.\d+)?)\s*(points?|rebounds?|assists?)',
+        full_text, re.IGNORECASE
+    )
+    if m:
+        player = m.group(1).strip()
+        line = float(m.group(2))
+        stat = m.group(3)
+        mkt = kalshi_stat_to_market(stat)
+        if mkt:
+            return (player, mkt, line, mid_prob)
+
+    # Pattern 3: Check if title has player name + subtitle has "X+ points" style
+    m = re.search(r'(\d+(?:\.\d+)?)\+?\s*(points?|rebounds?|assists?)', full_text, re.IGNORECASE)
+    if m:
+        line_raw = float(m.group(1))
+        stat = m.group(2)
+        # Try to extract player from title (everything before the number)
+        idx = full_text.lower().find(m.group(0).lower())
+        if idx > 2:
+            player = full_text[:idx].strip().rstrip(' -–—')
+            player = re.sub(r'^(will|can)\s+', '', player, flags=re.IGNORECASE).strip()
+            if len(player) > 3 and ' ' in player:
+                if line_raw == int(line_raw) and '.' not in m.group(1):
+                    line = line_raw - 0.5
+                else:
+                    line = line_raw
+                mkt = kalshi_stat_to_market(stat)
+                if mkt:
+                    return (player, mkt, line, mid_prob)
+
+    return None
+
+
+def fetch_kalshi_props(log_fn=None):
+    """
+    Fetch NBA player prop markets from Kalshi's free public API.
+    Returns: {normalized_player_name: {market_type: {line: over_prob}}}
+    """
+    def log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    kalshi_data = {}
+    total_parsed = 0
+
+    try:
+        # Strategy: get events with nested markets, filter for basketball
+        cursor = ''
+        all_markets = []
+
+        for page in range(10):  # Paginate
+            params = {
+                'status': 'open',
+                'limit': 200,
+                'with_nested_markets': 'true',
+            }
+            if cursor:
+                params['cursor'] = cursor
+
+            resp = requests.get(f"{KALSHI_API}/events", params=params, timeout=15)
+            if resp.status_code != 200:
+                log(f"  Kalshi API: HTTP {resp.status_code}")
+                break
+
+            data = resp.json()
+            events = data.get('events', [])
+            if not events:
+                break
+
+            for event in events:
+                cat = (event.get('category', '') or '').lower()
+                etitle = (event.get('title', '') or '').lower()
+                # Filter for basketball/NBA/NCAAB
+                if any(kw in cat or kw in etitle for kw in ['basketball', 'nba', 'ncaa']):
+                    for mkt in event.get('markets', []):
+                        if mkt.get('status') == 'open':
+                            all_markets.append(mkt)
+
+            cursor = data.get('cursor', '')
+            if not cursor:
+                break
+
+        log(f"  Kalshi: {len(all_markets)} open basketball markets found")
+
+        # Parse each market
+        for mkt in all_markets:
+            parsed = parse_kalshi_prop(mkt)
+            if parsed:
+                player, market_type, line, over_prob = parsed
+                norm = normalize_player_name(player)
+                if norm not in kalshi_data:
+                    kalshi_data[norm] = {}
+                if market_type not in kalshi_data[norm]:
+                    kalshi_data[norm][market_type] = {}
+                kalshi_data[norm][market_type][line] = over_prob
+                total_parsed += 1
+
+        log(f"  Kalshi: {total_parsed} player props parsed for {len(kalshi_data)} players")
+
+        # Log first few for debugging
+        for p in list(kalshi_data.keys())[:3]:
+            for mt in kalshi_data[p]:
+                for ln, prob in kalshi_data[p][mt].items():
+                    log(f"    → {p}: {mt} Over {ln} = {prob*100:.0f}%")
+
+    except Exception as e:
+        log(f"  Kalshi error: {e}")
+
+    return kalshi_data
 
 state = {
     'opportunities': [],
@@ -389,9 +572,19 @@ def analyze_game_markets(games_data, market_name=""):
 # PLAYER PROP ANALYSIS — Any book vs consensus of all others
 # ============================================================
 
-def analyze_player_props(games_data, market_name=""):
+def analyze_player_props(games_data, market_name="", kalshi_props=None, market_key=""):
     if not games_data:
         return []
+
+    # Determine market_key for Kalshi matching
+    if not market_key:
+        mn = market_name.lower()
+        if 'point' in mn:
+            market_key = 'player_points'
+        elif 'rebound' in mn:
+            market_key = 'player_rebounds'
+        elif 'assist' in mn:
+            market_key = 'player_assists'
 
     opportunities = []
     near_misses = []
@@ -464,10 +657,21 @@ def analyze_player_props(games_data, market_name=""):
                     fo, fu = devig_pair(ov, un)
                     devigged[bk] = {'over': fo, 'under': fu}
 
+                # Inject Kalshi data if available (no devigging needed — exchange price IS fair)
+                if kalshi_props and market_key:
+                    norm = normalize_player_name(player)
+                    if norm in kalshi_props and market_key in kalshi_props[norm]:
+                        k_lines = kalshi_props[norm][market_key]
+                        if line_val in k_lines:
+                            k_over = k_lines[line_val]
+                            devigged['kalshi'] = {'over': k_over, 'under': 1.0 - k_over}
+
                 # For each book, leave-one-out weighted consensus
-                for eval_book in group_books:
-                    if eval_book not in CO_BETTABLE:
-                        continue  # Only show bets on CO-legal books
+                # Evaluate CO books AND Kalshi (federally legal, bettable everywhere)
+                eval_candidates = list(group_books.keys()) + (['kalshi'] if 'kalshi' in devigged else [])
+                for eval_book in eval_candidates:
+                    if eval_book not in CO_BETTABLE and eval_book != 'kalshi':
+                        continue  # Only show bets on CO-legal books + Kalshi
                     other_over_fairs = []
                     other_weights = []
                     for other_bk in devigged:
@@ -484,16 +688,28 @@ def analyze_player_props(games_data, market_name=""):
                     consensus_over = sum(f * w for f, w in zip(other_over_fairs, other_weights)) / total_weight
                     consensus_under = 1.0 - consensus_over
 
-                    eb = group_books[eval_book]
-                    eval_over_imp = american_to_implied(eb['over_odds'])
-                    eval_under_imp = american_to_implied(eb['under_odds'])
-                    eval_over_fair = devigged[eval_book]['over']
-                    eval_under_fair = devigged[eval_book]['under']
-                    juice_pct = juice_map[eval_book]
+                    # Handle Kalshi differently — no American odds, no vig
+                    if eval_book == 'kalshi':
+                        eval_over_imp = devigged['kalshi']['over']
+                        eval_under_imp = devigged['kalshi']['under']
+                        eval_over_fair = eval_over_imp  # Exchange price IS fair
+                        eval_under_fair = eval_under_imp
+                        juice_pct = 0
+                        over_odds = round(implied_to_american(eval_over_imp))
+                        under_odds = round(implied_to_american(eval_under_imp))
+                    else:
+                        eb = group_books[eval_book]
+                        eval_over_imp = american_to_implied(eb['over_odds'])
+                        eval_under_imp = american_to_implied(eb['under_odds'])
+                        eval_over_fair = devigged[eval_book]['over']
+                        eval_under_fair = devigged[eval_book]['under']
+                        juice_pct = juice_map.get(eval_book, 0)
+                        over_odds = eb['over_odds']
+                        under_odds = eb['under_odds']
 
                     for side, eval_imp, eval_fair, consensus_fair, odds in [
-                        ('OVER', eval_over_imp, eval_over_fair, consensus_over, eb['over_odds']),
-                        ('UNDER', eval_under_imp, eval_under_fair, consensus_under, eb['under_odds']),
+                        ('OVER', eval_over_imp, eval_over_fair, consensus_over, over_odds),
+                        ('UNDER', eval_under_imp, eval_under_fair, consensus_under, under_odds),
                     ]:
                         net_edge = (consensus_fair - eval_imp) * 100
                         gross_edge = (consensus_fair - eval_fair) * 100
@@ -774,7 +990,7 @@ def find_prop_arbs(games_data, market_name=""):
 # EVENT-LEVEL PROP SCANNING
 # ============================================================
 
-def fetch_event_props(sport, prop_markets, max_events=8):
+def fetch_event_props(sport, prop_markets, max_events=8, kalshi_props=None):
     all_opps = []
     all_arbs = []
     events = fetch_events(sport)
@@ -795,7 +1011,8 @@ def fetch_event_props(sport, prop_markets, max_events=8):
                 return all_opps, all_arbs
             edata = fetch_event_odds(sport, eid, prop_market)
             if edata and edata.get('bookmakers'):
-                opps = analyze_player_props([edata], prop_name)
+                opps = analyze_player_props([edata], prop_name,
+                    kalshi_props=kalshi_props, market_key=prop_market)
                 arbs = find_prop_arbs([edata], prop_name)
                 if opps:
                     all_opps.extend(opps)
@@ -821,8 +1038,12 @@ def scan_markets():
 
     log_debug("=== SCAN STARTED ===")
     log_debug(f"Bettable: {', '.join(BOOK_DISPLAY.get(b, b) for b in CO_BETTABLE)}")
-    log_debug(f"Consensus: + {', '.join(BOOK_DISPLAY.get(b, b) for b in CONSENSUS_ONLY)}")
-    log_debug(f"Strategy: CO book vs weighted consensus (Pinnacle 3x) | Min edge: {MIN_EDGE_NET}%")
+    log_debug(f"Consensus: + {', '.join(BOOK_DISPLAY.get(b, b) for b in CONSENSUS_ONLY)} + Kalshi (props only)")
+    log_debug(f"Strategy: CO book vs weighted consensus (Pinnacle 3x, Kalshi 3x) | Min edge: {MIN_EDGE_NET}%")
+
+    # 0. Fetch Kalshi props (free, separate API, zero Odds API cost)
+    log_debug("--- Kalshi Exchange Data ---")
+    kalshi_props = fetch_kalshi_props(log_fn=log_debug)
 
     # 1. Player props (event-level) — +EV and arbs
     log_debug("--- Player Props ---")
@@ -830,7 +1051,8 @@ def scan_markets():
         if len(_dead_keys) >= len(API_KEYS):
             log_debug("  All keys exhausted — stopping")
             break
-        opps, arbs = fetch_event_props(sport, prop_markets, max_events=max_ev)
+        opps, arbs = fetch_event_props(sport, prop_markets, max_events=max_ev,
+            kalshi_props=kalshi_props)
         all_opps.extend(opps)
         all_opps.extend(arbs)
 
