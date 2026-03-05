@@ -140,6 +140,10 @@ def parse_kalshi_prop(market):
     subtitle = market.get('subtitle', '') or ''
     yes_sub = market.get('yes_sub_title', '') or ''
 
+    # Reject combos that slipped through
+    if title.count(',') >= 2 or ('yes ' in title.lower() and ',' in title):
+        return None
+
     # Fair probability from mid-market price
     yes_bid = market.get('yes_bid', 0) or 0
     yes_ask = market.get('yes_ask', 0) or 0
@@ -158,6 +162,17 @@ def parse_kalshi_prop(market):
 
     full_text = f"{title} {subtitle} {yes_sub}"
 
+    def _valid_name(n):
+        """Reject names that are clearly combos or garbage."""
+        n = n.strip()
+        if len(n) < 4 or len(n) > 40:
+            return False
+        if n.count(' ') > 4:  # Real names max ~4 words (e.g. "Shai Gilgeous-Alexander Jr")
+            return False
+        if ',' in n or 'yes' in n.lower() or 'no ' in n.lower():
+            return False
+        return True
+
     # Pattern 1: "Will [Player] score/have/record [X]+ [stat]"
     m = re.search(
         r'(?:Will\s+)?(.+?)\s+(?:score|have|record|get|make)\s+(\d+(?:\.\d+)?)\+?\s*'
@@ -174,7 +189,7 @@ def parse_kalshi_prop(market):
         else:
             line = line_raw
         mkt = kalshi_stat_to_market(stat)
-        if mkt:
+        if mkt and _valid_name(player):
             return (player, mkt, line, mid_prob)
 
     # Pattern 2: "[Player] Over [X] [stat]"
@@ -187,7 +202,7 @@ def parse_kalshi_prop(market):
         line = float(m.group(2))
         stat = m.group(3)
         mkt = kalshi_stat_to_market(stat)
-        if mkt:
+        if mkt and _valid_name(player):
             return (player, mkt, line, mid_prob)
 
     # Pattern 3: Check if title has player name + subtitle has "X+ points" style
@@ -200,7 +215,7 @@ def parse_kalshi_prop(market):
         if idx > 2:
             player = full_text[:idx].strip().rstrip(' -–—')
             player = re.sub(r'^(will|can)\s+', '', player, flags=re.IGNORECASE).strip()
-            if len(player) > 3 and ' ' in player:
+            if _valid_name(player):
                 if line_raw == int(line_raw) and '.' not in m.group(1):
                     line = line_raw - 0.5
                 else:
@@ -231,15 +246,18 @@ def fetch_kalshi_props(log_fn=None):
         cursor = ''
         all_props = []
 
-        for page in range(20):  # Up to 20 pages of 1000
+        for page in range(20):  # Up to 20 pages of 200
             params = {
                 'status': 'open',
-                'limit': 1000,
+                'limit': 200,
             }
             if cursor:
                 params['cursor'] = cursor
 
             resp = requests.get(f"{KALSHI_API}/markets", params=params, timeout=20)
+            if resp.status_code == 429:
+                log(f"  Kalshi API: rate limited on page {page+1}, using {total_fetched} markets so far")
+                break
             if resp.status_code != 200:
                 log(f"  Kalshi API: HTTP {resp.status_code}")
                 break
@@ -255,6 +273,12 @@ def fetch_kalshi_props(log_fn=None):
                 subtitle = (mkt.get('subtitle', '') or '').lower()
                 full = f"{title} {subtitle}"
 
+                # Skip combo/parlay markets — they have "yes X,yes Y" patterns
+                if title.count(',') >= 2:
+                    continue
+                if 'yes ' in title and ',' in title:
+                    continue
+
                 # Quick filter: look for player prop keywords
                 has_stat = any(kw in full for kw in ['points', 'rebounds', 'assists', 'three-pointer', '3-pointer'])
                 has_action = any(kw in full for kw in ['score', 'have', 'record', 'over', 'get', 'make'])
@@ -264,6 +288,7 @@ def fetch_kalshi_props(log_fn=None):
             cursor = data.get('cursor', '')
             if not cursor:
                 break
+            time.sleep(0.3)  # Be nice to Kalshi's rate limiter
 
         log(f"  Kalshi: scanned {total_fetched} open markets, {len(all_props)} look like player props")
 
