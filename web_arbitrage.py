@@ -139,9 +139,11 @@ def parse_kalshi_prop(market):
     title = market.get('title', '')
     subtitle = market.get('subtitle', '') or ''
     yes_sub = market.get('yes_sub_title', '') or ''
+    event_ticker = market.get('event_ticker', '') or ''
+    series_ticker = market.get('series_ticker', '') or ''
 
-    # Reject combos that slipped through
-    if title.count(',') >= 2 or ('yes ' in title.lower() and ',' in title):
+    # Reject any title with a comma — always a combo
+    if ',' in title:
         return None
 
     # Fair probability from mid-market price
@@ -167,11 +169,24 @@ def parse_kalshi_prop(market):
         n = n.strip()
         if len(n) < 4 or len(n) > 40:
             return False
-        if n.count(' ') > 4:  # Real names max ~4 words (e.g. "Shai Gilgeous-Alexander Jr")
+        if n.count(' ') > 4:
             return False
         if ',' in n or 'yes' in n.lower() or 'no ' in n.lower():
             return False
         return True
+
+    def _stat_from_context():
+        """Guess stat type from event/series ticker."""
+        ctx = f"{event_ticker} {series_ticker} {subtitle}".lower()
+        if 'point' in ctx or 'pts' in ctx:
+            return 'player_points'
+        elif 'rebound' in ctx or 'reb' in ctx:
+            return 'player_rebounds'
+        elif 'assist' in ctx or 'ast' in ctx:
+            return 'player_assists'
+        elif 'three' in ctx or '3pt' in ctx or '3p' in ctx:
+            return 'player_threes'
+        return None
 
     # Pattern 1: "Will [Player] score/have/record [X]+ [stat]"
     m = re.search(
@@ -224,6 +239,40 @@ def parse_kalshi_prop(market):
                 if mkt:
                     return (player, mkt, line, mid_prob)
 
+    # Pattern 4: Kalshi compact format — "Player: N+" or "Player: N+ [stat]"
+    m = re.search(r'^(.+?):\s*(\d+(?:\.\d+)?)\+\s*(points?|rebounds?|assists?)?', title.strip(), re.IGNORECASE)
+    if m:
+        player = m.group(1).strip()
+        line_raw = float(m.group(2))
+        stat_word = m.group(3)
+        if stat_word:
+            mkt = kalshi_stat_to_market(stat_word)
+        else:
+            mkt = _stat_from_context()
+        if mkt and _valid_name(player):
+            if line_raw == int(line_raw):
+                line = line_raw - 0.5
+            else:
+                line = line_raw
+            return (player, mkt, line, mid_prob)
+
+    # Pattern 5: Check yes_sub_title for "Player: N+"
+    m = re.search(r'^(.+?):\s*(\d+(?:\.\d+)?)\+\s*(points?|rebounds?|assists?)?', yes_sub.strip(), re.IGNORECASE)
+    if m:
+        player = m.group(1).strip()
+        line_raw = float(m.group(2))
+        stat_word = m.group(3)
+        if stat_word:
+            mkt = kalshi_stat_to_market(stat_word)
+        else:
+            mkt = _stat_from_context()
+        if mkt and _valid_name(player):
+            if line_raw == int(line_raw):
+                line = line_raw - 0.5
+            else:
+                line = line_raw
+            return (player, mkt, line, mid_prob)
+
     return None
 
 
@@ -273,16 +322,18 @@ def fetch_kalshi_props(log_fn=None):
                 subtitle = (mkt.get('subtitle', '') or '').lower()
                 full = f"{title} {subtitle}"
 
-                # Skip combo/parlay markets — they have "yes X,yes Y" patterns
-                if title.count(',') >= 2:
-                    continue
-                if 'yes ' in title and ',' in title:
+                # Skip ANY title with a comma — always a combo/parlay
+                if ',' in title:
                     continue
 
                 # Quick filter: look for player prop keywords
                 has_stat = any(kw in full for kw in ['points', 'rebounds', 'assists', 'three-pointer', '3-pointer'])
                 has_action = any(kw in full for kw in ['score', 'have', 'record', 'over', 'get', 'make'])
+                # Also catch "Player: N+" format (Kalshi's compact style)
+                has_compact = bool(re.search(r':\s*\d+\+', full))
                 if has_stat and (has_action or '+' in full):
+                    all_props.append(mkt)
+                elif has_compact:
                     all_props.append(mkt)
 
             cursor = data.get('cursor', '')
@@ -320,6 +371,14 @@ def fetch_kalshi_props(log_fn=None):
 
         log(f"  Kalshi: {total_parsed} player props parsed for {len(kalshi_data)} players")
 
+        # If 0 parsed, dump full fields from first candidate for debugging
+        if total_parsed == 0 and all_props:
+            m0 = all_props[0]
+            log(f"  Kalshi DEBUG — all fields of first candidate:")
+            for k, v in m0.items():
+                if v and str(v) != '0' and str(v) != 'False':
+                    log(f"    {k}: {str(v)[:120]}")
+
         # Log unparsed candidates so we can see the actual format
         unparsed = [m for m in all_props if parse_kalshi_prop(m) is None]
         if unparsed:
@@ -328,9 +387,11 @@ def fetch_kalshi_props(log_fn=None):
                 t = m.get('title', '?')
                 s = m.get('subtitle', '')
                 ys = m.get('yes_sub_title', '')
+                et = m.get('event_ticker', '')
+                st = m.get('series_ticker', '')
                 yb = m.get('yes_bid', 0)
                 ya = m.get('yes_ask', 0)
-                log(f"    ✗ title='{t}' sub='{s}' yes_sub='{ys}' bid={yb} ask={ya}")
+                log(f"    ✗ title='{t}' sub='{s}' yes_sub='{ys[:60]}' et='{et}' st='{st}' bid={yb} ask={ya}")
 
         # Log first few successful parses
         for p in list(kalshi_data.keys())[:3]:
@@ -1190,3 +1251,4 @@ def key_status():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
+
