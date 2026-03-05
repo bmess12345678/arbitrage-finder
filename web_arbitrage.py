@@ -223,48 +223,65 @@ def fetch_kalshi_props(log_fn=None):
 
     kalshi_data = {}
     total_parsed = 0
+    total_fetched = 0
 
     try:
-        # Strategy: get events with nested markets, filter for basketball
+        # Use /markets endpoint — paginate through open markets
+        # Filter client-side for basketball props by title parsing
         cursor = ''
-        all_markets = []
+        all_props = []
 
-        for page in range(10):  # Paginate
+        for page in range(20):  # Up to 20 pages of 1000
             params = {
                 'status': 'open',
-                'limit': 200,
-                'with_nested_markets': 'true',
+                'limit': 1000,
             }
             if cursor:
                 params['cursor'] = cursor
 
-            resp = requests.get(f"{KALSHI_API}/events", params=params, timeout=15)
+            resp = requests.get(f"{KALSHI_API}/markets", params=params, timeout=20)
             if resp.status_code != 200:
                 log(f"  Kalshi API: HTTP {resp.status_code}")
                 break
 
             data = resp.json()
-            events = data.get('events', [])
-            if not events:
+            markets = data.get('markets', [])
+            total_fetched += len(markets)
+            if not markets:
                 break
 
-            for event in events:
-                cat = (event.get('category', '') or '').lower()
-                etitle = (event.get('title', '') or '').lower()
-                # Filter for basketball/NBA/NCAAB
-                if any(kw in cat or kw in etitle for kw in ['basketball', 'nba', 'ncaa']):
-                    for mkt in event.get('markets', []):
-                        if mkt.get('status') == 'open':
-                            all_markets.append(mkt)
+            for mkt in markets:
+                title = (mkt.get('title', '') or '').lower()
+                subtitle = (mkt.get('subtitle', '') or '').lower()
+                full = f"{title} {subtitle}"
+
+                # Quick filter: look for player prop keywords
+                has_stat = any(kw in full for kw in ['points', 'rebounds', 'assists', 'three-pointer', '3-pointer'])
+                has_action = any(kw in full for kw in ['score', 'have', 'record', 'over', 'get', 'make'])
+                if has_stat and (has_action or '+' in full):
+                    all_props.append(mkt)
 
             cursor = data.get('cursor', '')
             if not cursor:
                 break
 
-        log(f"  Kalshi: {len(all_markets)} open basketball markets found")
+        log(f"  Kalshi: scanned {total_fetched} open markets, {len(all_props)} look like player props")
 
-        # Parse each market
-        for mkt in all_markets:
+        # If nothing matched, sample some titles for debugging
+        if len(all_props) == 0 and total_fetched > 0:
+            log(f"  Kalshi: no props matched keyword filter — sampling raw titles:")
+            # Re-fetch a small batch just to show some titles
+            try:
+                sample_resp = requests.get(f"{KALSHI_API}/markets",
+                    params={'status': 'open', 'limit': 20}, timeout=10)
+                if sample_resp.status_code == 200:
+                    for m in sample_resp.json().get('markets', [])[:10]:
+                        log(f"    raw: '{m.get('title','')}' | sub='{m.get('subtitle','')}'")
+            except:
+                pass
+
+        # Parse each candidate
+        for mkt in all_props:
             parsed = parse_kalshi_prop(mkt)
             if parsed:
                 player, market_type, line, over_prob = parsed
@@ -278,7 +295,19 @@ def fetch_kalshi_props(log_fn=None):
 
         log(f"  Kalshi: {total_parsed} player props parsed for {len(kalshi_data)} players")
 
-        # Log first few for debugging
+        # Log unparsed candidates so we can see the actual format
+        unparsed = [m for m in all_props if parse_kalshi_prop(m) is None]
+        if unparsed:
+            log(f"  Kalshi: {len(unparsed)} prop candidates NOT parsed — sample titles:")
+            for m in unparsed[:5]:
+                t = m.get('title', '?')
+                s = m.get('subtitle', '')
+                ys = m.get('yes_sub_title', '')
+                yb = m.get('yes_bid', 0)
+                ya = m.get('yes_ask', 0)
+                log(f"    ✗ title='{t}' sub='{s}' yes_sub='{ys}' bid={yb} ask={ya}")
+
+        # Log first few successful parses
         for p in list(kalshi_data.keys())[:3]:
             for mt in kalshi_data[p]:
                 for ln, prob in kalshi_data[p][mt].items():
