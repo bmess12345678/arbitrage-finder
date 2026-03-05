@@ -127,6 +127,7 @@
         .badge-hr { background: #e8510d; color: #fff; }
         .badge-bb { background: #7b3fa0; color: #fff; }
         .badge-bp { background: #005da6; color: #fff; }
+        .badge-kalshi { background: #00d4aa; color: #1a1a1a; }
 
         .badge-book { background: #2d3748; color: #a0aec0; }
         .badge-market { background: #2d3748; color: #a0aec0; }
@@ -192,7 +193,7 @@
 
     <div class="header">
         <h1>🎯 Colorado +EV Finder</h1>
-        <div class="sub">7 CO books + Pinnacle/Bovada/BetOnline consensus · Any outlier = +EV · Manual scan only</div>
+        <div class="sub">7 CO books + Kalshi + Pinnacle/Bovada/BetOnline · Any outlier = +EV · Manual scan only</div>
     </div>
 
     <div class="stats">
@@ -251,9 +252,9 @@
     </div>
 
     <div class="explainer" id="explainer" style="display:none;">
-        <strong>How it works:</strong> All 7 CO books + 3 sharp consensus books are devigged to find true fair odds.
-        Each CO book is compared against a <strong>weighted leave-one-out consensus</strong>, with
-        Pinnacle at 3x weight (sharpest book in the world — accepts unlimited sharp action).
+        <strong>How it works:</strong> All 7 CO books + 3 sharp consensus books + Kalshi exchange are devigged to find true fair odds.
+        Each CO book (and Kalshi) is compared against a <strong>weighted leave-one-out consensus</strong>, with
+        Pinnacle and Kalshi at 3x weight (sharpest signals — Pinnacle accepts unlimited sharp action, Kalshi is exchange-priced with no vig).
         <strong>Gross</strong> = pricing disagreement before juice.
         <strong>Net</strong> = your real edge after paying the vig. Any positive net = profitable long-term.
     </div>
@@ -386,7 +387,7 @@
                     'FanDuel': 'badge-fd', 'DraftKings': 'badge-dk',
                     'BetMGM': 'badge-mgm', 'BetRivers': 'badge-br',
                     'theScore Bet': 'badge-tsb', 'Hard Rock': 'badge-hr',
-                    'Bally Bet': 'badge-bb',
+                    'Bally Bet': 'badge-bb', 'Kalshi': 'badge-kalshi',
                 };
                 const bookBadge = bookBadges[opp.book] || 'badge-book';
 
