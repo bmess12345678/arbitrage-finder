@@ -1,7 +1,9 @@
 """
-+EV Finder — Colorado Sportsbooks
-Compares all CO-legal books against each other.
-Any book that's an outlier vs consensus = +EV bet.
++EV Finder — Sports, Cross-Exchange, Weather, Economic
+Sports: CO-legal books vs weighted consensus (Pinnacle/Kalshi 3x)
+Cross-Exchange: Kalshi vs Polymarket price disagreements
+Weather: Kalshi temperature contracts vs Open-Meteo forecasts
+Economic: Kalshi structural arbitrage on related contracts
 """
 
 from flask import Flask, render_template, jsonify, request
@@ -76,6 +78,7 @@ BOOK_DISPLAY = {
     'bovada': 'Bovada',
     'betonlineag': 'BetOnline',
     'kalshi': 'Kalshi',
+    'polymarket': 'Polymarket',
 }
 
 # Markets to scan
@@ -103,6 +106,7 @@ MIN_EDGE_NET = 0.1  # Show any +EV bet
 BOOK_WEIGHT = {
     'pinnacle': 3,
     'kalshi': 3,   # Exchange-priced, no vig — very sharp signal
+    'polymarket': 3,  # Exchange-priced, independent from Kalshi
 }
 # All other books default to weight 1
 
@@ -276,18 +280,19 @@ def parse_kalshi_prop(market):
     return None
 
 
-def fetch_kalshi_props(log_fn=None):
+def fetch_kalshi_sports(log_fn=None):
     """
-    Fetch NBA player prop markets from Kalshi's free public API.
-    Returns: {normalized_player_name: {market_type: {line: over_prob}}}
+    Fetch Kalshi sports markets (props + game outcomes).
+    Returns: {'props': {...}, 'games': {team_name: win_prob}}
     """
     def log(msg):
         if log_fn:
             log_fn(msg)
 
-    kalshi_data = {}
+    result = {'props': {}, 'games': {}}
     total_parsed = 0
     total_fetched = 0
+    games_matched = 0
 
     try:
         # Use /markets endpoint — paginate through open markets
@@ -326,6 +331,24 @@ def fetch_kalshi_props(log_fn=None):
                 if ',' in title:
                     continue
 
+                # Check for game outcome: "Team wins" / "Will Team win"
+                game_match = re.search(
+                    r'(?:will\s+)?(?:the\s+)?(.+?)\s+(?:wins?|beats?|defeats?)',
+                    title, re.IGNORECASE
+                )
+                if game_match:
+                    team_str = game_match.group(1).strip()
+                    yb = mkt.get('yes_bid', 0) or 0
+                    ya = mkt.get('yes_ask', 0) or 0
+                    if yb > 0 or ya > 0:
+                        mid = ((yb + ya) / 2 if yb > 0 and ya > 0 else yb or ya) / 100.0
+                        if 0.05 < mid < 0.95:
+                            for key, full_name in NBA_TEAMS.items():
+                                if key in team_str.lower():
+                                    result['games'][full_name] = mid
+                                    games_matched += 1
+                                    break
+
                 # Quick filter: look for player prop keywords
                 has_stat = any(kw in full for kw in ['points', 'rebounds', 'assists', 'three-pointer', '3-pointer'])
                 has_action = any(kw in full for kw in ['score', 'have', 'record', 'over', 'get', 'make'])
@@ -362,14 +385,17 @@ def fetch_kalshi_props(log_fn=None):
             if parsed:
                 player, market_type, line, over_prob = parsed
                 norm = normalize_player_name(player)
-                if norm not in kalshi_data:
-                    kalshi_data[norm] = {}
-                if market_type not in kalshi_data[norm]:
-                    kalshi_data[norm][market_type] = {}
-                kalshi_data[norm][market_type][line] = over_prob
+                if norm not in result["props"]:
+                    result["props"][norm] = {}
+                if market_type not in result["props"][norm]:
+                    result["props"][norm][market_type] = {}
+                result["props"][norm][market_type][line] = over_prob
                 total_parsed += 1
 
-        log(f"  Kalshi: {total_parsed} player props parsed for {len(kalshi_data)} players")
+        log(f"  Kalshi: {total_parsed} player props parsed for {len(result['props'])} players")
+        log(f"  Kalshi: {games_matched} game outcomes matched for {len(result['games'])} teams")
+        for team, prob in list(result['games'].items())[:3]:
+            log(f"    → {team}: {prob*100:.0f}% to win")
 
         # If 0 parsed, dump full fields from first candidate for debugging
         if total_parsed == 0 and all_props:
@@ -394,15 +420,136 @@ def fetch_kalshi_props(log_fn=None):
                 log(f"    ✗ title='{t}' sub='{s}' yes_sub='{ys[:60]}' et='{et}' st='{st}' bid={yb} ask={ya}")
 
         # Log first few successful parses
-        for p in list(kalshi_data.keys())[:3]:
-            for mt in kalshi_data[p]:
-                for ln, prob in kalshi_data[p][mt].items():
+        for p in list(result['props'].keys())[:3]:
+            for mt in result['props'][p]:
+                for ln, prob in result['props'][p][mt].items():
                     log(f"    → {p}: {mt} Over {ln} = {prob*100:.0f}%")
 
     except Exception as e:
         log(f"  Kalshi error: {e}")
 
-    return kalshi_data
+    return result
+
+POLYMARKET_GAMMA = "https://gamma-api.polymarket.com"
+
+# NBA team name variations for matching
+NBA_TEAMS = {
+    'hawks': 'Atlanta Hawks', 'celtics': 'Boston Celtics', 'nets': 'Brooklyn Nets',
+    'hornets': 'Charlotte Hornets', 'bulls': 'Chicago Bulls', 'cavaliers': 'Cleveland Cavaliers',
+    'mavericks': 'Dallas Mavericks', 'nuggets': 'Denver Nuggets', 'pistons': 'Detroit Pistons',
+    'warriors': 'Golden State Warriors', 'rockets': 'Houston Rockets', 'pacers': 'Indiana Pacers',
+    'clippers': 'Los Angeles Clippers', 'lakers': 'Los Angeles Lakers', 'grizzlies': 'Memphis Grizzlies',
+    'heat': 'Miami Heat', 'bucks': 'Milwaukee Bucks', 'timberwolves': 'Minnesota Timberwolves',
+    'pelicans': 'New Orleans Pelicans', 'knicks': 'New York Knicks', 'thunder': 'Oklahoma City Thunder',
+    'magic': 'Orlando Magic', '76ers': 'Philadelphia 76ers', 'sixers': 'Philadelphia 76ers',
+    'suns': 'Phoenix Suns', 'trail blazers': 'Portland Trail Blazers', 'blazers': 'Portland Trail Blazers',
+    'kings': 'Sacramento Kings', 'spurs': 'San Antonio Spurs', 'raptors': 'Toronto Raptors',
+    'jazz': 'Utah Jazz', 'wizards': 'Washington Wizards',
+}
+
+def fetch_polymarket_sports(log_fn=None):
+    """
+    Fetch Polymarket sports markets.
+    Returns dict with:
+      'games': {normalized_team_name: yes_probability}  — for moneyline consensus
+      'props': {normalized_player: {market_type: {line: over_prob}}} — for prop consensus
+    """
+    def log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    result = {'games': {}, 'props': {}}
+
+    try:
+        resp = requests.get(f"{POLYMARKET_GAMMA}/markets",
+            params={'closed': 'false', 'limit': 500, 'active': 'true', 'tag': 'sports'},
+            timeout=15)
+
+        if resp.status_code != 200:
+            # Try without tag filter
+            resp = requests.get(f"{POLYMARKET_GAMMA}/markets",
+                params={'closed': 'false', 'limit': 500, 'active': 'true'},
+                timeout=15)
+
+        if resp.status_code != 200:
+            log(f"  Polymarket API: HTTP {resp.status_code}")
+            return result
+
+        import json as _json
+        markets = resp.json() if isinstance(resp.json(), list) else []
+        sports_count = 0
+
+        for m in markets:
+            q = (m.get('question', '') or '').strip()
+            q_low = q.lower()
+
+            outcomes = m.get('outcomes', '[]')
+            prices = m.get('outcomePrices', '[]')
+            if isinstance(outcomes, str):
+                try:
+                    outcomes = _json.loads(outcomes)
+                    prices = _json.loads(prices)
+                except:
+                    continue
+            if len(outcomes) < 2 or len(prices) < 2:
+                continue
+            try:
+                yes_price = float(prices[0])
+            except:
+                continue
+            if yes_price <= 0.02 or yes_price >= 0.98:
+                continue
+
+            # Check if it's a game outcome: "Will [Team] win/beat..."
+            game_match = re.search(
+                r'(?:will|do)\s+(?:the\s+)?(.+?)\s+(?:win|beat|defeat)',
+                q_low, re.IGNORECASE
+            )
+            if game_match:
+                team_str = game_match.group(1).strip()
+                # Try to match to an NBA team
+                for key, full_name in NBA_TEAMS.items():
+                    if key in team_str:
+                        result['games'][full_name] = yes_price
+                        sports_count += 1
+                        break
+                continue
+
+            # Check if it's a player prop: "Will [Player] score X+ points"
+            prop_match = re.search(
+                r'(?:will\s+)?(.+?)\s+(?:score|have|record|get)\s+(\d+(?:\.\d+)?)\+?\s*'
+                r'(points?|rebounds?|assists?|three)',
+                q_low, re.IGNORECASE
+            )
+            if prop_match:
+                player = prop_match.group(1).strip()
+                line_raw = float(prop_match.group(2))
+                stat = prop_match.group(3)
+                mkt = kalshi_stat_to_market(stat)
+                if mkt:
+                    if line_raw == int(line_raw):
+                        line = line_raw - 0.5
+                    else:
+                        line = line_raw
+                    norm = normalize_player_name(player)
+                    if norm not in result['props']:
+                        result['props'][norm] = {}
+                    if mkt not in result['props'][norm]:
+                        result['props'][norm][mkt] = {}
+                    result['props'][norm][mkt][line] = yes_price
+                    sports_count += 1
+
+        log(f"  Polymarket: {len(markets)} total markets, {sports_count} sports matched")
+        log(f"    Games: {len(result['games'])} team outcomes, Props: {len(result['props'])} players")
+
+        for team, prob in list(result['games'].items())[:3]:
+            log(f"    → {team}: {prob*100:.0f}% to win")
+
+    except Exception as e:
+        log(f"  Polymarket sports error: {e}")
+
+    return result
+
 
 state = {
     'opportunities': [],
@@ -541,7 +688,7 @@ def fetch_event_odds(sport, event_id, market):
 # GAME MARKET ANALYSIS — Any book vs consensus of all others
 # ============================================================
 
-def analyze_game_markets(games_data, market_name=""):
+def analyze_game_markets(games_data, market_name="", poly_games=None, kalshi_games=None):
     if not games_data:
         return []
 
@@ -586,6 +733,38 @@ def analyze_game_markets(games_data, market_name=""):
         if len(book_devigged) < 3:
             continue  # Need at least 3 books for meaningful consensus
 
+        # Inject exchange game outcomes (Kalshi + Polymarket) into consensus
+        home = game.get('home_team', '')
+        away = game.get('away_team', '')
+        # Find the outcome keys from existing books
+        home_key = None
+        away_key = None
+        for bk in book_devigged:
+            for k in book_devigged[bk]:
+                name, pt = k
+                if name == home:
+                    home_key = k
+                elif name == away:
+                    away_key = k
+            if home_key and away_key:
+                break
+
+        for exchange_name, exchange_data in [('kalshi', kalshi_games), ('polymarket', poly_games)]:
+            if not exchange_data:
+                continue
+            ex_home = exchange_data.get(home)
+            ex_away = exchange_data.get(away)
+            if ex_home and home_key and away_key:
+                book_devigged[exchange_name] = {
+                    home_key: ex_home,
+                    away_key: 1.0 - ex_home,
+                }
+            elif ex_away and home_key and away_key:
+                book_devigged[exchange_name] = {
+                    away_key: ex_away,
+                    home_key: 1.0 - ex_away,
+                }
+
         # For each book, compute leave-one-out consensus and find outliers
         all_keys = set()
         for bk in book_devigged:
@@ -606,13 +785,23 @@ def analyze_game_markets(games_data, market_name=""):
                 # Leave-one-out weighted consensus: Pinnacle 3x, others 1x
                 other_fairs = []
                 other_weights = []
+                other_detail = []
                 for other_bk in book_devigged:
                     if other_bk == eval_book:
                         continue
                     if key in book_devigged[other_bk]:
                         w = get_weight(other_bk)
-                        other_fairs.append(book_devigged[other_bk][key])
+                        fair = book_devigged[other_bk][key]
+                        other_fairs.append(fair)
                         other_weights.append(w)
+                        raw_odds = book_pairs.get(other_bk, {}).get(key)
+                        other_detail.append({
+                            'book': BOOK_DISPLAY.get(other_bk, other_bk),
+                            'fair_prob': round(fair * 100, 1),
+                            'fair_odds': format_american(implied_to_american(fair)),
+                            'raw_odds': format_american(raw_odds) if raw_odds else '—',
+                            'weight': w,
+                        })
 
                 if len(other_fairs) < 2:
                     continue
@@ -668,6 +857,7 @@ def analyze_game_markets(games_data, market_name=""):
                     'fair_prob': round(consensus_fair * 100, 1),
                     'juice_display': f"{juice_pct}%",
                     'consensus_books': len(other_fairs),
+                    'consensus_detail': other_detail,
                     'kelly_fraction': round(kf * 100, 2),
                 })
 
@@ -687,7 +877,7 @@ def analyze_game_markets(games_data, market_name=""):
 # PLAYER PROP ANALYSIS — Any book vs consensus of all others
 # ============================================================
 
-def analyze_player_props(games_data, market_name="", kalshi_props=None, market_key=""):
+def analyze_player_props(games_data, market_name="", kalshi_props=None, poly_props=None, market_key=""):
     if not games_data:
         return []
 
@@ -781,20 +971,49 @@ def analyze_player_props(games_data, market_name="", kalshi_props=None, market_k
                             k_over = k_lines[line_val]
                             devigged['kalshi'] = {'over': k_over, 'under': 1.0 - k_over}
 
+                # Inject Polymarket data if available
+                if poly_props and market_key:
+                    norm = normalize_player_name(player)
+                    if norm in poly_props and market_key in poly_props[norm]:
+                        p_lines = poly_props[norm][market_key]
+                        if line_val in p_lines:
+                            p_over = p_lines[line_val]
+                            devigged['polymarket'] = {'over': p_over, 'under': 1.0 - p_over}
+
                 # For each book, leave-one-out weighted consensus
-                # Evaluate CO books AND Kalshi (federally legal, bettable everywhere)
-                eval_candidates = list(group_books.keys()) + (['kalshi'] if 'kalshi' in devigged else [])
+                # Evaluate CO books + Kalshi + Polymarket (exchange-priced, bettable)
+                exchange_books = [b for b in ['kalshi', 'polymarket'] if b in devigged]
+                eval_candidates = list(group_books.keys()) + exchange_books
                 for eval_book in eval_candidates:
-                    if eval_book not in CO_BETTABLE and eval_book != 'kalshi':
-                        continue  # Only show bets on CO-legal books + Kalshi
+                    if eval_book not in CO_BETTABLE and eval_book not in ('kalshi', 'polymarket'):
+                        continue  # Only show bets on CO-legal books + exchanges
                     other_over_fairs = []
                     other_weights = []
+                    other_detail = []
                     for other_bk in devigged:
                         if other_bk == eval_book:
                             continue
                         w = get_weight(other_bk)
                         other_over_fairs.append(devigged[other_bk]['over'])
                         other_weights.append(w)
+                        # Get raw odds for display
+                        if other_bk in group_books:
+                            raw_over = format_american(group_books[other_bk].get('over_odds', 0))
+                            raw_under = format_american(group_books[other_bk].get('under_odds', 0))
+                        elif other_bk == 'kalshi':
+                            raw_over = f"{devigged['kalshi']['over']*100:.0f}¢"
+                            raw_under = f"{devigged['kalshi']['under']*100:.0f}¢"
+                        else:
+                            raw_over = '—'
+                            raw_under = '—'
+                        other_detail.append({
+                            'book': BOOK_DISPLAY.get(other_bk, other_bk),
+                            'over_prob': round(devigged[other_bk]['over'] * 100, 1),
+                            'over_odds': format_american(implied_to_american(devigged[other_bk]['over'])),
+                            'raw_over': raw_over,
+                            'raw_under': raw_under,
+                            'weight': w,
+                        })
 
                     if len(other_over_fairs) < 2:
                         continue
@@ -803,10 +1022,10 @@ def analyze_player_props(games_data, market_name="", kalshi_props=None, market_k
                     consensus_over = sum(f * w for f, w in zip(other_over_fairs, other_weights)) / total_weight
                     consensus_under = 1.0 - consensus_over
 
-                    # Handle Kalshi differently — no American odds, no vig
-                    if eval_book == 'kalshi':
-                        eval_over_imp = devigged['kalshi']['over']
-                        eval_under_imp = devigged['kalshi']['under']
+                    # Handle exchange books differently — no American odds, no vig
+                    if eval_book in ('kalshi', 'polymarket'):
+                        eval_over_imp = devigged[eval_book]['over']
+                        eval_under_imp = devigged[eval_book]['under']
                         eval_over_fair = eval_over_imp  # Exchange price IS fair
                         eval_under_fair = eval_under_imp
                         juice_pct = 0
@@ -853,6 +1072,7 @@ def analyze_player_props(games_data, market_name="", kalshi_props=None, market_k
                                 'fair_prob': round(consensus_fair * 100, 1),
                                 'juice_display': f"{juice_pct}%",
                                 'consensus_books': len(other_over_fairs),
+                                'consensus_detail': other_detail,
                                 'kelly_fraction': round(kf * 100, 2),
                             })
                         elif net_edge > -3:
@@ -1105,7 +1325,7 @@ def find_prop_arbs(games_data, market_name=""):
 # EVENT-LEVEL PROP SCANNING
 # ============================================================
 
-def fetch_event_props(sport, prop_markets, max_events=8, kalshi_props=None):
+def fetch_event_props(sport, prop_markets, max_events=8, kalshi_props=None, poly_props=None):
     all_opps = []
     all_arbs = []
     events = fetch_events(sport)
@@ -1127,7 +1347,7 @@ def fetch_event_props(sport, prop_markets, max_events=8, kalshi_props=None):
             edata = fetch_event_odds(sport, eid, prop_market)
             if edata and edata.get('bookmakers'):
                 opps = analyze_player_props([edata], prop_name,
-                    kalshi_props=kalshi_props, market_key=prop_market)
+                    kalshi_props=kalshi_props, poly_props=poly_props, market_key=prop_market)
                 arbs = find_prop_arbs([edata], prop_name)
                 if opps:
                     all_opps.extend(opps)
@@ -1138,6 +1358,483 @@ def fetch_event_props(sport, prop_markets, max_events=8, kalshi_props=None):
 
     log_debug(f"  {sport} props: {len(all_opps)} +EV, {len(all_arbs)} arbs")
     return all_opps, all_arbs
+
+
+# ============================================================
+# KALSHI vs POLYMARKET CROSS-EXCHANGE SCANNER
+# ============================================================
+
+POLYMARKET_API = "https://gamma-api.polymarket.com"
+
+def fetch_cross_exchange_opps():
+    """Compare Kalshi vs Polymarket prices on overlapping markets."""
+    opportunities = []
+
+    try:
+        # 1. Fetch Kalshi non-sports markets
+        log_debug("  Fetching Kalshi non-sports markets...")
+        kalshi_markets = {}
+        cursor = ''
+        for page in range(5):
+            params = {'status': 'open', 'limit': 200}
+            if cursor:
+                params['cursor'] = cursor
+            resp = requests.get(f"{KALSHI_API}/markets", params=params, timeout=15)
+            if resp.status_code != 200:
+                break
+            data = resp.json()
+            mkts = data.get('markets', [])
+            if not mkts:
+                break
+            for m in mkts:
+                title = (m.get('title', '') or '').lower().strip()
+                if ',' in title:
+                    continue  # Skip combos
+                yb = m.get('yes_bid', 0) or 0
+                ya = m.get('yes_ask', 0) or 0
+                if yb <= 0 and ya <= 0:
+                    continue
+                mid = ((yb + ya) / 2 if yb > 0 and ya > 0 else yb or ya) / 100.0
+                if 0.05 < mid < 0.95:
+                    kalshi_markets[title] = {
+                        'title': m.get('title', ''),
+                        'mid': mid,
+                        'yes_bid': yb,
+                        'yes_ask': ya,
+                        'ticker': m.get('ticker', ''),
+                        'event_ticker': m.get('event_ticker', ''),
+                    }
+            cursor = data.get('cursor', '')
+            if not cursor:
+                break
+            time.sleep(0.3)
+
+        log_debug(f"  Kalshi: {len(kalshi_markets)} tradeable non-combo markets")
+
+        # 2. Fetch Polymarket active markets
+        log_debug("  Fetching Polymarket markets...")
+        poly_markets = {}
+        try:
+            resp = requests.get(f"{POLYMARKET_API}/markets",
+                params={'closed': 'false', 'limit': 500, 'active': 'true'},
+                timeout=15)
+            if resp.status_code == 200:
+                for m in resp.json():
+                    q = (m.get('question', '') or '').lower().strip()
+                    outcomes = m.get('outcomes', '[]')
+                    prices = m.get('outcomePrices', '[]')
+                    if isinstance(outcomes, str):
+                        import json as _json
+                        try:
+                            outcomes = _json.loads(outcomes)
+                            prices = _json.loads(prices)
+                        except:
+                            continue
+                    if len(outcomes) >= 2 and len(prices) >= 2:
+                        try:
+                            yes_price = float(prices[0])
+                        except:
+                            continue
+                        if 0.05 < yes_price < 0.95:
+                            poly_markets[q] = {
+                                'title': m.get('question', ''),
+                                'yes_price': yes_price,
+                                'volume': m.get('volume', 0),
+                                'slug': m.get('slug', ''),
+                            }
+        except Exception as e:
+            log_debug(f"  Polymarket error: {e}")
+
+        log_debug(f"  Polymarket: {len(poly_markets)} active markets")
+
+        # 3. Fuzzy match and compare
+        from difflib import SequenceMatcher
+        matches = 0
+        for k_title, k_data in kalshi_markets.items():
+            best_score = 0
+            best_poly = None
+            for p_title, p_data in poly_markets.items():
+                score = SequenceMatcher(None, k_title, p_title).ratio()
+                if score > best_score:
+                    best_score = score
+                    best_poly = (p_title, p_data)
+
+            if best_score < 0.65 or not best_poly:
+                continue
+
+            p_title, p_data = best_poly
+            matches += 1
+
+            k_mid = k_data['mid']
+            p_yes = p_data['yes_price']
+            diff = abs(k_mid - p_yes) * 100
+
+            if diff < 3:  # Less than 3% disagreement — not actionable
+                continue
+
+            # Determine which side to bet
+            # If Kalshi is cheaper, buy YES on Kalshi
+            # If Polymarket is cheaper, buy YES on Polymarket
+            if k_mid < p_yes:
+                edge = (p_yes - k_mid) * 100
+                bet_on = 'Kalshi'
+                bet_action = 'BUY YES'
+                bet_odds = round(implied_to_american(k_mid))
+                fair_odds = round(implied_to_american(p_yes))
+            else:
+                edge = (k_mid - p_yes) * 100
+                bet_on = 'Polymarket'
+                bet_action = 'BUY YES'
+                bet_odds = round(implied_to_american(p_yes))
+                fair_odds = round(implied_to_american(k_mid))
+
+            opportunities.append({
+                'player': k_data['title'][:60],
+                'game': f"Kalshi {k_mid*100:.0f}¢ vs Poly {p_yes*100:.0f}¢",
+                'commence': '',
+                'market': 'Cross-Exchange',
+                'book': bet_on,
+                'type': 'cross_exchange',
+                'edge': round(edge, 1),
+                'gross_edge': round(edge, 1),
+                'recommendation': f"{bet_action} on {bet_on}",
+                'odds': bet_odds,
+                'label1_name': f'Kalshi',
+                'label1_value': f"{k_mid*100:.0f}¢ ({format_american(round(implied_to_american(k_mid)))})",
+                'label2_name': f'Polymarket',
+                'label2_value': f"{p_yes*100:.0f}¢ ({format_american(round(implied_to_american(p_yes)))})",
+                'label3_name': 'Spread',
+                'label3_value': f"+{diff:.1f}%",
+                'target_prob': round(min(k_mid, p_yes) * 100, 1),
+                'fair_prob': round(max(k_mid, p_yes) * 100, 1),
+                'juice_display': '—',
+                'consensus_books': 2,
+                'kelly_fraction': round(quarter_kelly(max(k_mid, p_yes), bet_odds) * 100, 2) if bet_odds != 0 else 0,
+            })
+
+        log_debug(f"  Cross-exchange: {matches} matched markets, {len(opportunities)} actionable spreads")
+
+    except Exception as e:
+        log_debug(f"  Cross-exchange error: {e}")
+
+    return opportunities
+
+
+# ============================================================
+# WEATHER MARKET SCANNER (Kalshi vs Open-Meteo forecast)
+# ============================================================
+
+OPEN_METEO_API = "https://api.open-meteo.com/v1/forecast"
+
+# Cities Kalshi typically offers weather contracts for
+WEATHER_CITIES = {
+    'nyc':     {'lat': 40.78, 'lon': -73.97, 'names': ['new york', 'nyc', 'central park']},
+    'chicago': {'lat': 41.88, 'lon': -87.63, 'names': ['chicago']},
+    'miami':   {'lat': 25.76, 'lon': -80.19, 'names': ['miami']},
+    'la':      {'lat': 34.05, 'lon': -118.24, 'names': ['los angeles', 'la ', 'lax']},
+    'austin':  {'lat': 30.27, 'lon': -97.74, 'names': ['austin']},
+    'denver':  {'lat': 39.74, 'lon': -104.98, 'names': ['denver']},
+}
+
+def fetch_weather_opps():
+    """Compare Kalshi temperature markets against weather model forecasts."""
+    opportunities = []
+
+    try:
+        # 1. Fetch Kalshi weather/temperature markets
+        log_debug("  Fetching Kalshi weather markets...")
+        weather_mkts = []
+        cursor = ''
+        for page in range(5):
+            params = {'status': 'open', 'limit': 200}
+            if cursor:
+                params['cursor'] = cursor
+            resp = requests.get(f"{KALSHI_API}/markets", params=params, timeout=15)
+            if resp.status_code != 200:
+                break
+            data = resp.json()
+            mkts = data.get('markets', [])
+            if not mkts:
+                break
+            for m in mkts:
+                title = (m.get('title', '') or '').lower()
+                sticker = (m.get('series_ticker', '') or '').lower()
+                if ',' in title:
+                    continue
+                if any(kw in title or kw in sticker for kw in ['temperature', 'temp', 'high', 'kxhigh', 'kxlow']):
+                    yb = m.get('yes_bid', 0) or 0
+                    ya = m.get('yes_ask', 0) or 0
+                    if yb > 0 or ya > 0:
+                        weather_mkts.append(m)
+            cursor = data.get('cursor', '')
+            if not cursor:
+                break
+            time.sleep(0.3)
+
+        log_debug(f"  Kalshi: {len(weather_mkts)} weather/temperature markets")
+
+        if not weather_mkts:
+            return []
+
+        # 2. For each weather market, try to match city and fetch forecast
+        import math
+
+        for mkt in weather_mkts:
+            title = (mkt.get('title', '') or '')
+            title_low = title.lower()
+            sticker = (mkt.get('series_ticker', '') or '').lower()
+
+            # Match city
+            matched_city = None
+            for city_key, city_info in WEATHER_CITIES.items():
+                if any(n in title_low or n in sticker for n in city_info['names']):
+                    matched_city = (city_key, city_info)
+                    break
+
+            if not matched_city:
+                continue
+
+            city_key, city_info = matched_city
+
+            # Extract threshold temperature from title
+            # Patterns: "above X°", "over X degrees", "at least X", "X or higher", "higher than X"
+            temp_match = re.search(r'(\d+(?:\.\d+)?)\s*°?(?:f|fahrenheit)?', title_low)
+            if not temp_match:
+                continue
+            threshold = float(temp_match.group(1))
+            if threshold < -20 or threshold > 140:
+                continue
+
+            # Determine if it's "above" or "below"
+            is_over = any(kw in title_low for kw in ['above', 'over', 'higher', 'at least', 'exceed', 'or more', 'high'])
+            is_under = any(kw in title_low for kw in ['below', 'under', 'lower', 'at most', 'or less', 'low'])
+            if not is_over and not is_under:
+                is_over = True  # Default assumption for "highest temp" style
+
+            # Kalshi mid price
+            yb = mkt.get('yes_bid', 0) or 0
+            ya = mkt.get('yes_ask', 0) or 0
+            k_mid = ((yb + ya) / 2 if yb > 0 and ya > 0 else yb or ya) / 100.0
+
+            # 3. Fetch forecast from Open-Meteo
+            try:
+                f_resp = requests.get(OPEN_METEO_API, params={
+                    'latitude': city_info['lat'],
+                    'longitude': city_info['lon'],
+                    'daily': 'temperature_2m_max,temperature_2m_min',
+                    'temperature_unit': 'fahrenheit',
+                    'forecast_days': 3,
+                    'timezone': 'America/New_York',
+                }, timeout=10)
+                if f_resp.status_code != 200:
+                    continue
+                fdata = f_resp.json()
+                daily = fdata.get('daily', {})
+                maxes = daily.get('temperature_2m_max', [])
+                if not maxes:
+                    continue
+
+                # Use tomorrow's forecast (index 1) as primary
+                forecast_high = maxes[1] if len(maxes) > 1 else maxes[0]
+
+                # Model: assume temperature follows roughly normal distribution
+                # with mean = forecast and std dev ≈ 3°F (typical 1-day forecast error)
+                std_dev = 3.0
+                # P(temp > threshold)
+                z = (threshold - forecast_high) / std_dev
+                # Normal CDF approximation
+                def norm_cdf(x):
+                    return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
+                if is_over:
+                    model_prob = 1.0 - norm_cdf(z)
+                else:
+                    model_prob = norm_cdf(z)
+
+                if model_prob < 0.02 or model_prob > 0.98:
+                    continue
+
+                # Compare
+                edge = (model_prob - k_mid) * 100
+                if abs(edge) < 3:
+                    continue
+
+                if edge > 0:
+                    # Model says YES is more likely than Kalshi price — buy YES
+                    bet_action = 'BUY YES'
+                    display_edge = edge
+                else:
+                    # Model says NO is more likely — buy NO
+                    bet_action = 'BUY NO'
+                    display_edge = abs(edge)
+                    model_prob = 1.0 - model_prob
+                    k_mid = 1.0 - k_mid
+
+                opportunities.append({
+                    'player': title[:60],
+                    'game': f"{city_key.upper()} · Forecast high: {forecast_high:.0f}°F · Threshold: {threshold:.0f}°F",
+                    'commence': '',
+                    'market': 'Weather',
+                    'book': 'Kalshi',
+                    'type': 'weather',
+                    'edge': round(display_edge, 1),
+                    'gross_edge': round(display_edge, 1),
+                    'recommendation': f"{bet_action} on Kalshi",
+                    'odds': round(implied_to_american(k_mid)) if k_mid > 0 and k_mid < 1 else 0,
+                    'label1_name': 'Kalshi Price',
+                    'label1_value': f"{(mkt.get('yes_bid',0) or 0)}–{(mkt.get('yes_ask',0) or 0)}¢",
+                    'label2_name': 'Model Fair',
+                    'label2_value': f"{model_prob*100:.0f}%",
+                    'label3_name': 'Edge',
+                    'label3_value': f"+{display_edge:.1f}%",
+                    'target_prob': round(k_mid * 100, 1),
+                    'fair_prob': round(model_prob * 100, 1),
+                    'juice_display': f"±{std_dev:.0f}°F",
+                    'consensus_books': 0,
+                    'kelly_fraction': round(quarter_kelly(model_prob, round(implied_to_american(k_mid))) * 100, 2) if 0 < k_mid < 1 else 0,
+                })
+
+            except Exception as e:
+                continue
+
+        log_debug(f"  Weather: {len(opportunities)} model-vs-market edges")
+
+    except Exception as e:
+        log_debug(f"  Weather error: {e}")
+
+    return opportunities
+
+
+# ============================================================
+# ECONOMIC DATA SCANNER (Kalshi markets + public signals)
+# ============================================================
+
+def fetch_econ_opps():
+    """Find Kalshi economic markets and flag any with obvious mispricings."""
+    opportunities = []
+
+    try:
+        log_debug("  Fetching Kalshi economic markets...")
+        econ_mkts = []
+        cursor = ''
+        econ_kws = ['fed', 'rate', 'cpi', 'inflation', 'jobs', 'unemployment',
+                     'gdp', 'payroll', 'fomc', 'interest rate', 'recession']
+
+        for page in range(5):
+            params = {'status': 'open', 'limit': 200}
+            if cursor:
+                params['cursor'] = cursor
+            resp = requests.get(f"{KALSHI_API}/markets", params=params, timeout=15)
+            if resp.status_code != 200:
+                break
+            data = resp.json()
+            mkts = data.get('markets', [])
+            if not mkts:
+                break
+            for m in mkts:
+                title = (m.get('title', '') or '').lower()
+                sticker = (m.get('series_ticker', '') or '').lower()
+                if ',' in title:
+                    continue
+                if any(kw in title or kw in sticker for kw in econ_kws):
+                    yb = m.get('yes_bid', 0) or 0
+                    ya = m.get('yes_ask', 0) or 0
+                    if yb > 0 or ya > 0:
+                        econ_mkts.append(m)
+            cursor = data.get('cursor', '')
+            if not cursor:
+                break
+            time.sleep(0.3)
+
+        log_debug(f"  Kalshi: {len(econ_mkts)} economic markets found")
+
+        # Check for structural arbitrages: monotonicity violations
+        # Group by series (e.g., all CPI markets for the same release)
+        from collections import defaultdict
+        series_groups = defaultdict(list)
+        for m in econ_mkts:
+            st = m.get('series_ticker', '') or m.get('event_ticker', '') or 'other'
+            series_groups[st].append(m)
+
+        arb_count = 0
+        for series, mkts in series_groups.items():
+            if len(mkts) < 2:
+                continue
+
+            # Extract thresholds and prices
+            parsed = []
+            for m in mkts:
+                title = m.get('title', '')
+                yb = m.get('yes_bid', 0) or 0
+                ya = m.get('yes_ask', 0) or 0
+                mid = ((yb + ya) / 2 if yb > 0 and ya > 0 else yb or ya) / 100.0
+
+                # Try to extract a numeric threshold
+                nums = re.findall(r'(\d+(?:\.\d+)?)\s*%?', title)
+                if nums:
+                    threshold = float(nums[-1])  # Last number is usually the threshold
+                    parsed.append({'title': title, 'threshold': threshold,
+                                  'mid': mid, 'yb': yb, 'ya': ya, 'ticker': m.get('ticker', '')})
+
+            if len(parsed) < 2:
+                continue
+
+            # Sort by threshold
+            parsed.sort(key=lambda x: x['threshold'])
+
+            # Check for monotonicity violations
+            # For "above X" style: P(above 3%) should be >= P(above 4%)
+            for i in range(len(parsed) - 1):
+                a = parsed[i]
+                b = parsed[i + 1]
+                # If higher threshold has higher price, that's potentially a violation
+                if b['mid'] > a['mid'] + 0.03:  # 3% buffer for noise
+                    arb_count += 1
+                    edge = (b['mid'] - a['mid']) * 100
+                    opportunities.append({
+                        'player': f"Structural: {a['title'][:30]} vs {b['title'][:30]}",
+                        'game': f"Series: {series}",
+                        'commence': '',
+                        'market': 'Economic',
+                        'book': 'Kalshi',
+                        'type': 'economic',
+                        'edge': round(edge, 1),
+                        'gross_edge': round(edge, 1),
+                        'recommendation': f"Monotonicity violation",
+                        'odds': 0,
+                        'label1_name': f'≥{a["threshold"]}',
+                        'label1_value': f'{a["mid"]*100:.0f}¢',
+                        'label2_name': f'≥{b["threshold"]}',
+                        'label2_value': f'{b["mid"]*100:.0f}¢',
+                        'label3_name': 'Spread',
+                        'label3_value': f"+{edge:.1f}%",
+                        'target_prob': round(a['mid'] * 100, 1),
+                        'fair_prob': round(b['mid'] * 100, 1),
+                        'juice_display': '—',
+                        'consensus_books': 0,
+                        'kelly_fraction': 0,
+                    })
+
+        # Also surface wide bid-ask spreads as manual review opportunities
+        wide_spread = []
+        for m in econ_mkts:
+            yb = m.get('yes_bid', 0) or 0
+            ya = m.get('yes_ask', 0) or 0
+            if yb > 0 and ya > 0:
+                spread = ya - yb
+                mid = (yb + ya) / 2
+                if spread >= 8 and 15 < mid < 85:  # Wide spread, mid-range price
+                    wide_spread.append(m)
+
+        if wide_spread:
+            log_debug(f"  Economic: {len(wide_spread)} markets with wide spreads (≥8¢) for manual review")
+
+        log_debug(f"  Economic: {len(econ_mkts)} markets, {arb_count} structural arbs, {len(opportunities)} opportunities")
+
+    except Exception as e:
+        log_debug(f"  Economic error: {e}")
+
+    return opportunities
 
 
 # ============================================================
@@ -1153,12 +1850,19 @@ def scan_markets():
 
     log_debug("=== SCAN STARTED ===")
     log_debug(f"Bettable: {', '.join(BOOK_DISPLAY.get(b, b) for b in CO_BETTABLE)}")
-    log_debug(f"Consensus: + {', '.join(BOOK_DISPLAY.get(b, b) for b in CONSENSUS_ONLY)} + Kalshi (props only)")
-    log_debug(f"Strategy: CO book vs weighted consensus (Pinnacle 3x, Kalshi 3x) | Min edge: {MIN_EDGE_NET}%")
+    log_debug(f"Consensus: + {', '.join(BOOK_DISPLAY.get(b, b) for b in CONSENSUS_ONLY)} + Kalshi + Polymarket")
+    log_debug(f"Strategy: CO book vs weighted consensus (Pinnacle/Kalshi/Poly 3x) | Min edge: {MIN_EDGE_NET}%")
 
-    # 0. Fetch Kalshi props (free, separate API, zero Odds API cost)
-    log_debug("--- Kalshi Exchange Data ---")
-    kalshi_props = fetch_kalshi_props(log_fn=log_debug)
+    # 0. Fetch exchange data (free, separate APIs, zero Odds API cost)
+    log_debug("--- Exchange Data ---")
+    kalshi_sports = fetch_kalshi_sports(log_fn=log_debug)
+    kalshi_props = kalshi_sports.get('props', {})
+    kalshi_games = kalshi_sports.get('games', {})
+    poly_sports = fetch_polymarket_sports(log_fn=log_debug)
+    poly_props = poly_sports.get('props', {})
+    poly_games = poly_sports.get('games', {})
+
+    log_debug(f"  Exchange games: Kalshi {len(kalshi_games)} teams, Polymarket {len(poly_games)} teams")
 
     # 1. Player props (event-level) — +EV and arbs
     log_debug("--- Player Props ---")
@@ -1167,7 +1871,7 @@ def scan_markets():
             log_debug("  All keys exhausted — stopping")
             break
         opps, arbs = fetch_event_props(sport, prop_markets, max_events=max_ev,
-            kalshi_props=kalshi_props)
+            kalshi_props=kalshi_props, poly_props=poly_props)
         all_opps.extend(opps)
         all_opps.extend(arbs)
 
@@ -1179,7 +1883,7 @@ def scan_markets():
             break
         games = fetch_odds(sport, market)
         if games:
-            opps = analyze_game_markets(games, name)
+            opps = analyze_game_markets(games, name, poly_games=poly_games, kalshi_games=kalshi_games)
             arbs = find_game_arbs(games, name)
             if opps:
                 all_opps.extend(opps)
@@ -1187,7 +1891,33 @@ def scan_markets():
                 all_opps.extend(arbs)
         time.sleep(0.3)
 
-    all_opps.sort(key=lambda x: (-1 if x['type'] == 'arbitrage' else 0, -x['edge']))
+    # 3. Kalshi vs Polymarket cross-exchange
+    log_debug("--- Kalshi vs Polymarket ---")
+    try:
+        cross_opps = fetch_cross_exchange_opps()
+        all_opps.extend(cross_opps)
+    except Exception as e:
+        log_debug(f"  Cross-exchange error: {e}")
+
+    # 4. Weather model vs Kalshi
+    log_debug("--- Weather Markets ---")
+    try:
+        weather_opps = fetch_weather_opps()
+        all_opps.extend(weather_opps)
+    except Exception as e:
+        log_debug(f"  Weather error: {e}")
+
+    # 5. Economic structural arbitrage
+    log_debug("--- Economic Markets ---")
+    try:
+        econ_opps = fetch_econ_opps()
+        all_opps.extend(econ_opps)
+    except Exception as e:
+        log_debug(f"  Economic error: {e}")
+
+    # Sort: arbs first, then by edge descending
+    type_priority = {'arbitrage': 0, 'cross_exchange': 1, 'weather': 2, 'economic': 3}
+    all_opps.sort(key=lambda x: (type_priority.get(x['type'], 4) if x['type'] != 'arbitrage' else 0, -x['edge']))
 
     state['opportunities'] = all_opps
     state['last_scan'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -1195,8 +1925,11 @@ def scan_markets():
 
     active = len(API_KEYS) - len(_dead_keys)
     arb_count = len([o for o in all_opps if o['type'] == 'arbitrage'])
-    ev_count = len(all_opps) - arb_count
-    log_debug(f"=== DONE: {ev_count} +EV bets, {arb_count} arbitrage ({active}/{len(API_KEYS)} keys active) ===")
+    cross_count = len([o for o in all_opps if o['type'] == 'cross_exchange'])
+    weather_count = len([o for o in all_opps if o['type'] == 'weather'])
+    econ_count = len([o for o in all_opps if o['type'] == 'economic'])
+    sports_count = len(all_opps) - arb_count - cross_count - weather_count - econ_count
+    log_debug(f"=== DONE: {sports_count} sports +EV, {arb_count} arb, {cross_count} cross-exchange, {weather_count} weather, {econ_count} econ ({active}/{len(API_KEYS)} keys active) ===")
 
 
 # ============================================================
@@ -1251,4 +1984,3 @@ def key_status():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
-
