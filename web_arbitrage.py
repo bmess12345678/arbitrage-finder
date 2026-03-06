@@ -1022,22 +1022,27 @@ def analyze_player_props(games_data, market_name="", kalshi_props=None, poly_pro
                         w = get_weight(other_bk)
                         other_over_fairs.append(devigged[other_bk]['over'])
                         other_weights.append(w)
-                        # Get raw odds for display
+                        # Get raw odds and compute vig for display
                         if other_bk in group_books:
                             raw_over = format_american(group_books[other_bk].get('over_odds', 0))
                             raw_under = format_american(group_books[other_bk].get('under_odds', 0))
+                            vig = juice_map.get(other_bk, 0)
                         elif other_bk in ('kalshi', 'polymarket'):
                             raw_over = f"{devigged[other_bk]['over']*100:.0f}¢"
                             raw_under = f"{devigged[other_bk]['under']*100:.0f}¢"
+                            vig = 0
                         else:
                             raw_over = '—'
                             raw_under = '—'
+                            vig = 0
                         other_detail.append({
                             'book': BOOK_DISPLAY.get(other_bk, other_bk),
                             'over_prob': round(devigged[other_bk]['over'] * 100, 1),
                             'over_odds': format_american(implied_to_american(devigged[other_bk]['over'])),
+                            'under_odds': format_american(implied_to_american(devigged[other_bk]['under'])),
                             'raw_over': raw_over,
                             'raw_under': raw_under,
+                            'vig': vig,
                             'weight': w,
                         })
 
@@ -1552,78 +1557,64 @@ def fetch_cross_exchange_opps():
 
 OPEN_METEO_API = "https://api.open-meteo.com/v1/forecast"
 
-# Cities Kalshi typically offers weather contracts for
-WEATHER_CITIES = {
-    'nyc':     {'lat': 40.78, 'lon': -73.97, 'names': ['new york', 'nyc', 'central park']},
-    'chicago': {'lat': 41.88, 'lon': -87.63, 'names': ['chicago']},
-    'miami':   {'lat': 25.76, 'lon': -80.19, 'names': ['miami']},
-    'la':      {'lat': 34.05, 'lon': -118.24, 'names': ['los angeles', 'la ', 'lax']},
-    'austin':  {'lat': 30.27, 'lon': -97.74, 'names': ['austin']},
-    'denver':  {'lat': 39.74, 'lon': -104.98, 'names': ['denver']},
-}
-
 def fetch_weather_opps():
     """Compare Kalshi temperature markets against weather model forecasts."""
     opportunities = []
 
     try:
-        # 1. Fetch Kalshi weather/temperature markets
-        log_debug("  Fetching Kalshi weather markets...")
-        weather_mkts = []
-        cursor = ''
-        for page in range(5):
-            params = {'status': 'open', 'limit': 200}
-            if cursor:
-                params['cursor'] = cursor
-            resp = requests.get(f"{KALSHI_API}/markets", params=params, timeout=15)
-            if resp.status_code != 200:
-                break
-            data = resp.json()
-            mkts = data.get('markets', [])
-            if not mkts:
-                break
-            for m in mkts:
-                title = (m.get('title', '') or '').lower()
-                sticker = (m.get('series_ticker', '') or '').lower()
-                if ',' in title:
-                    continue
-                if any(kw in title or kw in sticker for kw in ['temperature', 'temp', 'high', 'kxhigh', 'kxlow']):
-                    yb = m.get('yes_bid', 0) or 0
-                    ya = m.get('yes_ask', 0) or 0
-                    if yb > 0 or ya > 0:
-                        weather_mkts.append(m)
-            cursor = data.get('cursor', '')
-            if not cursor:
-                break
-            time.sleep(0.3)
+        # Known Kalshi weather series tickers — query directly instead of scanning
+        WEATHER_SERIES = {
+            'KXHIGHNY':  {'city': 'NYC',     'lat': 40.78, 'lon': -73.97, 'type': 'high'},
+            'KXHIGHCHI': {'city': 'Chicago',  'lat': 41.88, 'lon': -87.63, 'type': 'high'},
+            'KXHIGHMIA': {'city': 'Miami',    'lat': 25.76, 'lon': -80.19, 'type': 'high'},
+            'KXHIGHLA':  {'city': 'LA',       'lat': 34.05, 'lon': -118.24, 'type': 'high'},
+            'KXHIGHAUS': {'city': 'Austin',   'lat': 30.27, 'lon': -97.74, 'type': 'high'},
+            'KXHIGHDEN': {'city': 'Denver',   'lat': 39.74, 'lon': -104.98, 'type': 'high'},
+        }
 
-        log_debug(f"  Kalshi: {len(weather_mkts)} weather/temperature markets")
+        weather_mkts = []
+        log_debug("  Fetching Kalshi weather via series tickers...")
+
+        for series_ticker, info in WEATHER_SERIES.items():
+            try:
+                resp = requests.get(f"{KALSHI_API}/markets",
+                    params={'series_ticker': series_ticker, 'status': 'open', 'limit': 50},
+                    timeout=10)
+                if resp.status_code == 200:
+                    mkts = resp.json().get('markets', [])
+                    for m in mkts:
+                        if ',' in (m.get('title', '') or ''):
+                            continue
+                        yb = m.get('yes_bid', 0) or 0
+                        ya = m.get('yes_ask', 0) or 0
+                        if yb > 0 or ya > 0:
+                            m['_city_info'] = info
+                            m['_series'] = series_ticker
+                            weather_mkts.append(m)
+                elif resp.status_code == 429:
+                    log_debug(f"  Kalshi rate limited on {series_ticker}, skipping rest")
+                    break
+                time.sleep(0.5)
+            except:
+                continue
+
+        log_debug(f"  Kalshi weather: {len(weather_mkts)} markets from {len(WEATHER_SERIES)} series")
 
         if not weather_mkts:
             return []
 
-        # 2. For each weather market, try to match city and fetch forecast
+        # 2. For each weather market, fetch forecast and compare
         import math
+        # Cache forecasts per city to avoid duplicate API calls
+        forecast_cache = {}
 
         for mkt in weather_mkts:
             title = (mkt.get('title', '') or '')
             title_low = title.lower()
-            sticker = (mkt.get('series_ticker', '') or '').lower()
-
-            # Match city
-            matched_city = None
-            for city_key, city_info in WEATHER_CITIES.items():
-                if any(n in title_low or n in sticker for n in city_info['names']):
-                    matched_city = (city_key, city_info)
-                    break
-
-            if not matched_city:
-                continue
-
-            city_key, city_info = matched_city
+            city_info = mkt.get('_city_info', {})
+            city_key = city_info.get('city', '?')
 
             # Extract threshold temperature from title
-            # Patterns: "above X°", "over X degrees", "at least X", "X or higher", "higher than X"
             temp_match = re.search(r'(\d+(?:\.\d+)?)\s*°?(?:f|fahrenheit)?', title_low)
             if not temp_match:
                 continue
@@ -1635,33 +1626,35 @@ def fetch_weather_opps():
             is_over = any(kw in title_low for kw in ['above', 'over', 'higher', 'at least', 'exceed', 'or more', 'high'])
             is_under = any(kw in title_low for kw in ['below', 'under', 'lower', 'at most', 'or less', 'low'])
             if not is_over and not is_under:
-                is_over = True  # Default assumption for "highest temp" style
+                is_over = True  # Default for "highest temp" series
 
             # Kalshi mid price
             yb = mkt.get('yes_bid', 0) or 0
             ya = mkt.get('yes_ask', 0) or 0
             k_mid = ((yb + ya) / 2 if yb > 0 and ya > 0 else yb or ya) / 100.0
 
-            # 3. Fetch forecast from Open-Meteo
+            # 3. Fetch forecast from Open-Meteo (cached per city)
             try:
-                f_resp = requests.get(OPEN_METEO_API, params={
-                    'latitude': city_info['lat'],
-                    'longitude': city_info['lon'],
-                    'daily': 'temperature_2m_max,temperature_2m_min',
-                    'temperature_unit': 'fahrenheit',
-                    'forecast_days': 3,
-                    'timezone': 'America/New_York',
-                }, timeout=10)
-                if f_resp.status_code != 200:
-                    continue
-                fdata = f_resp.json()
-                daily = fdata.get('daily', {})
-                maxes = daily.get('temperature_2m_max', [])
-                if not maxes:
-                    continue
+                if city_key not in forecast_cache:
+                    f_resp = requests.get(OPEN_METEO_API, params={
+                        'latitude': city_info['lat'],
+                        'longitude': city_info['lon'],
+                        'daily': 'temperature_2m_max,temperature_2m_min',
+                        'temperature_unit': 'fahrenheit',
+                        'forecast_days': 3,
+                        'timezone': 'America/New_York',
+                    }, timeout=10)
+                    if f_resp.status_code != 200:
+                        continue
+                    fdata = f_resp.json()
+                    daily = fdata.get('daily', {})
+                    maxes = daily.get('temperature_2m_max', [])
+                    if not maxes:
+                        continue
+                    forecast_cache[city_key] = maxes[1] if len(maxes) > 1 else maxes[0]
+                    log_debug(f"    {city_key} forecast high: {forecast_cache[city_key]:.0f}°F")
 
-                # Use tomorrow's forecast (index 1) as primary
-                forecast_high = maxes[1] if len(maxes) > 1 else maxes[0]
+                forecast_high = forecast_cache[city_key]
 
                 # Model: assume temperature follows roughly normal distribution
                 # with mean = forecast and std dev ≈ 3°F (typical 1-day forecast error)
@@ -1740,37 +1733,36 @@ def fetch_econ_opps():
     opportunities = []
 
     try:
-        log_debug("  Fetching Kalshi economic markets...")
-        econ_mkts = []
-        cursor = ''
-        econ_kws = ['fed', 'rate', 'cpi', 'inflation', 'jobs', 'unemployment',
-                     'gdp', 'payroll', 'fomc', 'interest rate', 'recession']
+        # Known Kalshi economic series tickers
+        ECON_SERIES = [
+            'KXFED', 'KXCPI', 'KXJOBS', 'KXGDP', 'KXINFL',
+            'KXUNRATE', 'KXRECESSION', 'KXPCE', 'KXNFP',
+            'FED', 'FOMC', 'CPI', 'INXD', 'INXW',
+        ]
 
-        for page in range(5):
-            params = {'status': 'open', 'limit': 200}
-            if cursor:
-                params['cursor'] = cursor
-            resp = requests.get(f"{KALSHI_API}/markets", params=params, timeout=15)
-            if resp.status_code != 200:
-                break
-            data = resp.json()
-            mkts = data.get('markets', [])
-            if not mkts:
-                break
-            for m in mkts:
-                title = (m.get('title', '') or '').lower()
-                sticker = (m.get('series_ticker', '') or '').lower()
-                if ',' in title:
-                    continue
-                if any(kw in title or kw in sticker for kw in econ_kws):
-                    yb = m.get('yes_bid', 0) or 0
-                    ya = m.get('yes_ask', 0) or 0
-                    if yb > 0 or ya > 0:
-                        econ_mkts.append(m)
-            cursor = data.get('cursor', '')
-            if not cursor:
-                break
-            time.sleep(0.3)
+        econ_mkts = []
+        log_debug("  Fetching Kalshi economic markets via series tickers...")
+
+        for series in ECON_SERIES:
+            try:
+                resp = requests.get(f"{KALSHI_API}/markets",
+                    params={'series_ticker': series, 'status': 'open', 'limit': 50},
+                    timeout=10)
+                if resp.status_code == 200:
+                    mkts = resp.json().get('markets', [])
+                    for m in mkts:
+                        if ',' in (m.get('title', '') or ''):
+                            continue
+                        yb = m.get('yes_bid', 0) or 0
+                        ya = m.get('yes_ask', 0) or 0
+                        if yb > 0 or ya > 0:
+                            econ_mkts.append(m)
+                elif resp.status_code == 429:
+                    log_debug(f"  Kalshi rate limited on {series}, stopping econ scan")
+                    break
+                time.sleep(0.5)
+            except:
+                continue
 
         log_debug(f"  Kalshi: {len(econ_mkts)} economic markets found")
 
