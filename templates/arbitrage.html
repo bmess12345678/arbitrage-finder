@@ -313,28 +313,30 @@
             const d = opp.consensus_detail;
             const isProp = opp.type === 'player_prop';
             let rows = '';
-            // Sort by weight desc, then by book name
             d.sort((a, b) => (b.weight || 1) - (a.weight || 1) || (a.book || '').localeCompare(b.book || ''));
             for (const b of d) {
-                const wt = b.weight > 1 ? `<span class="tip-wt">(${b.weight}x)</span>` : '';
+                const wt = b.weight > 1 ? ` <span class="tip-wt">(${b.weight}x)</span>` : '';
+                const vig = b.vig ? `<span class="tip-wt">${b.vig}%</span>` : '<span class="tip-wt">0%</span>';
                 if (isProp) {
                     rows += `<div class="tip-row">
-                        <span class="tip-book">${b.book} ${wt}</span>
-                        <span class="tip-odds">${b.raw_over || '—'}</span>
-                        <span class="tip-fair">${b.over_odds || '—'}</span>
+                        <span class="tip-book">${b.book}${wt}</span>
+                        <span class="tip-odds">${b.raw_over || '—'} / ${b.raw_under || '—'}</span>
+                        <span class="tip-fair">${b.over_odds || '—'} / ${b.under_odds || '—'}</span>
+                        <span>${vig}</span>
                     </div>`;
                 } else {
                     rows += `<div class="tip-row">
-                        <span class="tip-book">${b.book} ${wt}</span>
+                        <span class="tip-book">${b.book}${wt}</span>
                         <span class="tip-odds">${b.raw_odds || '—'}</span>
                         <span class="tip-fair">${b.fair_odds || '—'}</span>
                     </div>`;
                 }
             }
+            const header = isProp
+                ? '<span>Book</span><span>Over / Under</span><span>Fair O / U</span><span>Vig</span>'
+                : '<span>Book</span><span>Posted</span><span>Fair</span>';
             return `<div class="tip-content">
-                <div class="tip-header">
-                    <span>Book</span><span>Posted</span><span>Fair</span>
-                </div>
+                <div class="tip-header">${header}</div>
                 ${rows}
             </div>`;
         }
