@@ -97,6 +97,10 @@ PROP_MARKETS = [
         ('player_points', 'NCAAB Points'),
         ('player_rebounds', 'NCAAB Rebounds'),
     ], 8),
+    ('icehockey_nhl', [
+        ('player_points', 'NHL Points'),
+        ('player_shots_on_goal', 'NHL Shots on Goal'),
+    ], 6),
 ]
 
 MIN_EDGE_NET = 0.1  # Show any +EV bet
@@ -114,10 +118,24 @@ def get_weight(book_key):
     return BOOK_WEIGHT.get(book_key, 1)
 
 # ============================================================
-# KALSHI INTEGRATION — Free public API, no auth, zero Odds API cost
+# KALSHI INTEGRATION — Authenticated API for higher rate limits
 # ============================================================
 
 KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
+KALSHI_API_KEY = os.environ.get('KALSHI_API_KEY', '')
+
+def kalshi_headers():
+    """Return auth headers for Kalshi API if key is configured."""
+    if KALSHI_API_KEY:
+        return {
+            'Authorization': f'Bearer {KALSHI_API_KEY}',
+            'Content-Type': 'application/json',
+        }
+    return {'Content-Type': 'application/json'}
+
+def kalshi_get(url, params=None, timeout=15):
+    """Make authenticated GET request to Kalshi."""
+    return requests.get(url, params=params, headers=kalshi_headers(), timeout=timeout)
 
 def normalize_player_name(name):
     """Normalize for matching: lowercase, strip suffixes."""
@@ -308,11 +326,11 @@ def fetch_kalshi_sports(log_fn=None):
             if cursor:
                 params['cursor'] = cursor
 
-            resp = requests.get(f"{KALSHI_API}/markets", params=params, timeout=20)
+            resp = kalshi_get(f"{KALSHI_API}/markets", params=params, timeout=20)
             if resp.status_code == 429:
                 log(f"  Kalshi API: rate limited on page {page+1}, waiting 3s...")
                 time.sleep(3)
-                resp = requests.get(f"{KALSHI_API}/markets", params=params, timeout=20)
+                resp = kalshi_get(f"{KALSHI_API}/markets", params=params, timeout=20)
                 if resp.status_code == 429:
                     log(f"  Kalshi API: still rate limited, using {total_fetched} markets so far")
                     break
@@ -383,7 +401,7 @@ def fetch_kalshi_sports(log_fn=None):
             log(f"  Kalshi: no props matched keyword filter — sampling raw titles:")
             # Re-fetch a small batch just to show some titles
             try:
-                sample_resp = requests.get(f"{KALSHI_API}/markets",
+                sample_resp = kalshi_get(f"{KALSHI_API}/markets",
                     params={'status': 'open', 'limit': 20}, timeout=10)
                 if sample_resp.status_code == 200:
                     for m in sample_resp.json().get('markets', [])[:10]:
@@ -1410,7 +1428,7 @@ def fetch_cross_exchange_opps():
             params = {'status': 'open', 'limit': 200}
             if cursor:
                 params['cursor'] = cursor
-            resp = requests.get(f"{KALSHI_API}/markets", params=params, timeout=15)
+            resp = kalshi_get(f"{KALSHI_API}/markets", params=params, timeout=15)
             if resp.status_code != 200:
                 break
             data = resp.json()
@@ -1582,7 +1600,7 @@ def fetch_weather_opps():
 
         for series_ticker, info in WEATHER_SERIES.items():
             try:
-                resp = requests.get(f"{KALSHI_API}/markets",
+                resp = kalshi_get(f"{KALSHI_API}/markets",
                     params={'series_ticker': series_ticker, 'status': 'open', 'limit': 50},
                     timeout=10)
                 if resp.status_code == 200:
@@ -1604,7 +1622,7 @@ def fetch_weather_opps():
                 elif resp.status_code == 429:
                     log_debug(f"  Kalshi rate limited on {series_ticker}, waiting 5s...")
                     time.sleep(5)
-                    resp = requests.get(f"{KALSHI_API}/markets",
+                    resp = kalshi_get(f"{KALSHI_API}/markets",
                         params={'series_ticker': series_ticker, 'status': 'open', 'limit': 50},
                         timeout=10)
                     if resp.status_code == 200:
@@ -1626,7 +1644,7 @@ def fetch_weather_opps():
                     else:
                         log_debug(f"  Kalshi still rate limited, skipping remaining weather")
                         break
-                time.sleep(1.5)
+                time.sleep(0.5)
             except:
                 continue
 
@@ -1779,7 +1797,7 @@ def fetch_econ_opps():
 
         for series in ECON_SERIES:
             try:
-                resp = requests.get(f"{KALSHI_API}/markets",
+                resp = kalshi_get(f"{KALSHI_API}/markets",
                     params={'series_ticker': series, 'status': 'open', 'limit': 50},
                     timeout=10)
                 if resp.status_code == 200:
@@ -1798,7 +1816,7 @@ def fetch_econ_opps():
                 elif resp.status_code == 429:
                     log_debug(f"  Kalshi rate limited on {series}, waiting 5s...")
                     time.sleep(5)
-                    resp = requests.get(f"{KALSHI_API}/markets",
+                    resp = kalshi_get(f"{KALSHI_API}/markets",
                         params={'series_ticker': series, 'status': 'open', 'limit': 50},
                         timeout=10)
                     if resp.status_code == 200:
@@ -1817,7 +1835,7 @@ def fetch_econ_opps():
                     else:
                         log_debug(f"  Kalshi still rate limited, skipping remaining econ")
                         break
-                time.sleep(1.5)
+                time.sleep(0.5)
             except:
                 continue
 
@@ -1942,7 +1960,8 @@ def scan_markets():
 
     # ---- KALSHI MARKETS (weather + econ first, before rate limit exhausted) ----
     # Weather and econ use targeted series queries = high value per API call
-    # General /markets scan for props only returns combos = skip it
+    kalshi_auth = "authenticated" if KALSHI_API_KEY else "unauthenticated (set KALSHI_API_KEY env var)"
+    log_debug(f"  Kalshi API: {kalshi_auth}")
 
     log_debug("--- Weather Markets (Kalshi) ---")
     try:
@@ -2075,7 +2094,7 @@ def kalshi_debug():
 
     # 1. Try /series endpoint to list all series
     try:
-        resp = requests.get(f"{KALSHI_API}/series", timeout=10)
+        resp = kalshi_get(f"{KALSHI_API}/series", timeout=10)
         if resp.status_code == 200:
             series_list = resp.json().get('series', [])
             for s in series_list:
@@ -2094,7 +2113,7 @@ def kalshi_debug():
 
     # 2. Try fetching a page of individual (non-combo) markets
     try:
-        resp = requests.get(f"{KALSHI_API}/markets",
+        resp = kalshi_get(f"{KALSHI_API}/markets",
             params={'status': 'open', 'limit': 100}, timeout=10)
         if resp.status_code == 200:
             mkts = resp.json().get('markets', [])
