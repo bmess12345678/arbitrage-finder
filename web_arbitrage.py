@@ -1562,39 +1562,18 @@ def fetch_weather_opps():
     opportunities = []
 
     try:
-        # Real Kalshi weather series tickers (from /api/kalshi-debug)
-        # Daily high temps are most actionable for forecast comparison
+        # Real Kalshi weather series tickers — top cities only to stay under rate limit
         WEATHER_SERIES = {
-            # Daily high temperature series
             'KXHIGHNY':      {'city': 'NYC',       'lat': 40.78, 'lon': -73.97},
-            'KXHIGHNYD':     {'city': 'NYC',       'lat': 40.78, 'lon': -73.97},
             'KXHIGHCHI':     {'city': 'Chicago',   'lat': 41.88, 'lon': -87.63},
             'KXHIGHMIA':     {'city': 'Miami',     'lat': 25.76, 'lon': -80.19},
             'KXHIGHLAX':     {'city': 'LA',        'lat': 34.05, 'lon': -118.24},
             'KXHIGHAUS':     {'city': 'Austin',    'lat': 30.27, 'lon': -97.74},
             'KXHIGHDEN':     {'city': 'Denver',    'lat': 39.74, 'lon': -104.98},
-            'KXDENHIGH':     {'city': 'Denver',    'lat': 39.74, 'lon': -104.98},
             'KXHIGHTDC':     {'city': 'DC',        'lat': 38.90, 'lon': -77.04},
             'KXHIGHTBOS':    {'city': 'Boston',    'lat': 42.36, 'lon': -71.06},
-            'KXHIGHTHOU':    {'city': 'Houston',   'lat': 29.76, 'lon': -95.37},
-            'KXHIGHTDAL':    {'city': 'Dallas',    'lat': 32.78, 'lon': -96.80},
-            'KXHIGHTLV':     {'city': 'Las Vegas', 'lat': 36.17, 'lon': -115.14},
-            'KXHIGHTPHX':    {'city': 'Phoenix',   'lat': 33.45, 'lon': -112.07},
-            'KXHIGHTSFO':    {'city': 'SF',        'lat': 37.77, 'lon': -122.42},
             'KXHIGHTSEA':    {'city': 'Seattle',   'lat': 47.61, 'lon': -122.33},
-            'KXHIGHTMIN':    {'city': 'Minneapolis','lat': 44.98, 'lon': -93.27},
             'KXHIGHTATL':    {'city': 'Atlanta',   'lat': 33.75, 'lon': -84.39},
-            'KXHIGHTOKC':    {'city': 'OKC',       'lat': 35.47, 'lon': -97.52},
-            'KXHIGHTSATX':   {'city': 'San Antonio','lat': 29.42, 'lon': -98.49},
-            'KXHIGHTNOLA':   {'city': 'New Orleans','lat': 29.95, 'lon': -90.07},
-            'KXHOUHIGH':     {'city': 'Houston',   'lat': 29.76, 'lon': -95.37},
-            'KXHIGHTEMPDEN': {'city': 'Denver',    'lat': 39.74, 'lon': -104.98},
-            'KXPHILHIGH':    {'city': 'Philadelphia','lat': 39.95, 'lon': -75.17},
-            'KXHIGHPHIL':    {'city': 'Philadelphia','lat': 39.95, 'lon': -75.17},
-            'HIGHNY':        {'city': 'NYC',       'lat': 40.78, 'lon': -73.97},
-            'HIGHCHI':       {'city': 'Chicago',   'lat': 41.88, 'lon': -87.63},
-            'HIGHMIA':       {'city': 'Miami',     'lat': 25.76, 'lon': -80.19},
-            'HIGHAUS':       {'city': 'Austin',    'lat': 30.27, 'lon': -97.74},
         }
 
         weather_mkts = []
@@ -1623,9 +1602,31 @@ def fetch_weather_opps():
                         series_with_data += 1
                         log_debug(f"    {series_ticker} ({info['city']}): {count} markets")
                 elif resp.status_code == 429:
-                    log_debug(f"  Kalshi rate limited on {series_ticker}, skipping rest")
-                    break
-                time.sleep(0.5)
+                    log_debug(f"  Kalshi rate limited on {series_ticker}, waiting 5s...")
+                    time.sleep(5)
+                    resp = requests.get(f"{KALSHI_API}/markets",
+                        params={'series_ticker': series_ticker, 'status': 'open', 'limit': 50},
+                        timeout=10)
+                    if resp.status_code == 200:
+                        mkts = resp.json().get('markets', [])
+                        count = 0
+                        for m in mkts:
+                            if ',' in (m.get('title', '') or ''):
+                                continue
+                            yb = m.get('yes_bid', 0) or 0
+                            ya = m.get('yes_ask', 0) or 0
+                            if yb > 0 or ya > 0:
+                                m['_city_info'] = info
+                                m['_series'] = series_ticker
+                                weather_mkts.append(m)
+                                count += 1
+                        if count > 0:
+                            series_with_data += 1
+                            log_debug(f"    {series_ticker} ({info['city']}): {count} markets (retry)")
+                    else:
+                        log_debug(f"  Kalshi still rate limited, skipping remaining weather")
+                        break
+                time.sleep(1.5)
             except:
                 continue
 
@@ -1764,21 +1765,13 @@ def fetch_econ_opps():
     opportunities = []
 
     try:
-        # Real Kalshi economic series tickers (from /api/kalshi-debug)
+        # Real Kalshi economic series tickers — most liquid/actionable only
         ECON_SERIES = [
-            'KXFED', 'FED', 'KXFEDDECISION', 'FEDDECISION',
-            'KXCPI', 'CPI', 'KXCPICORE', 'CPICORE',
-            'KXCPIYOY', 'CPIYOY', 'KXCPICOREYOY', 'CPICOREYOY',
-            'KXPAYROLLS', 'PAYROLLS', 'KXPROLLS',
-            'KXGDP', 'GDP', 'KXGDPYEAR',
-            'KXRATECUT', 'RATECUT', 'KXRATECUTS', 'RATECUTS',
-            'KXECONSTATU3', 'KXU3',
-            'KXPCECORE', 'PCECORE',
-            'KXRECSSNBER', 'RECSSNBER',
-            'KXFRM', 'FRM',
-            'KXEFFTARIFF', 'KXAVGTARIFF',
-            'KXDOTPLOT', 'DOTPLOT',
-            'KXACPI', 'ACPI', 'KXACPICORE',
+            'KXFED', 'FED', 'FEDDECISION',
+            'KXCPI', 'CPI', 'KXCPICORE',
+            'KXPAYROLLS', 'PAYROLLS',
+            'KXGDP', 'GDP',
+            'RATECUT', 'KXRATECUT',
         ]
 
         econ_mkts = []
@@ -1803,9 +1796,28 @@ def fetch_econ_opps():
                     if count > 0:
                         log_debug(f"    {series}: {count} markets")
                 elif resp.status_code == 429:
-                    log_debug(f"  Kalshi rate limited on {series}, stopping econ scan")
-                    break
-                time.sleep(0.5)
+                    log_debug(f"  Kalshi rate limited on {series}, waiting 5s...")
+                    time.sleep(5)
+                    resp = requests.get(f"{KALSHI_API}/markets",
+                        params={'series_ticker': series, 'status': 'open', 'limit': 50},
+                        timeout=10)
+                    if resp.status_code == 200:
+                        mkts = resp.json().get('markets', [])
+                        count = 0
+                        for m in mkts:
+                            if ',' in (m.get('title', '') or ''):
+                                continue
+                            yb = m.get('yes_bid', 0) or 0
+                            ya = m.get('yes_ask', 0) or 0
+                            if yb > 0 or ya > 0:
+                                econ_mkts.append(m)
+                                count += 1
+                        if count > 0:
+                            log_debug(f"    {series}: {count} markets (retry)")
+                    else:
+                        log_debug(f"  Kalshi still rate limited, skipping remaining econ")
+                        break
+                time.sleep(1.5)
             except:
                 continue
 
@@ -1928,17 +1940,38 @@ def scan_markets():
     log_debug(f"Consensus: + {', '.join(BOOK_DISPLAY.get(b, b) for b in CONSENSUS_ONLY)} + Kalshi + Polymarket")
     log_debug(f"Strategy: CO book vs weighted consensus (Pinnacle/Kalshi/Poly 3x) | Min edge: {MIN_EDGE_NET}%")
 
-    # 0. Fetch exchange data (free, separate APIs, zero Odds API cost)
-    log_debug("--- Exchange Data ---")
-    kalshi_sports = fetch_kalshi_sports(log_fn=log_debug)
-    kalshi_props = kalshi_sports.get('props', {})
-    kalshi_games = kalshi_sports.get('games', {})
+    # ---- KALSHI MARKETS (weather + econ first, before rate limit exhausted) ----
+    # Weather and econ use targeted series queries = high value per API call
+    # General /markets scan for props only returns combos = skip it
+
+    log_debug("--- Weather Markets (Kalshi) ---")
+    try:
+        weather_opps = fetch_weather_opps()
+        all_opps.extend(weather_opps)
+    except Exception as e:
+        log_debug(f"  Weather error: {e}")
+
+    log_debug("--- Economic Markets (Kalshi) ---")
+    try:
+        econ_opps = fetch_econ_opps()
+        all_opps.extend(econ_opps)
+    except Exception as e:
+        log_debug(f"  Economic error: {e}")
+
+    # ---- POLYMARKET (separate API, no Kalshi rate limit) ----
+    log_debug("--- Polymarket ---")
     poly_sports = fetch_polymarket_sports(log_fn=log_debug)
     poly_props = poly_sports.get('props', {})
     poly_games = poly_sports.get('games', {})
 
-    log_debug(f"  Exchange games: Kalshi {len(kalshi_games)} teams, Polymarket {len(poly_games)} teams")
+    # Kalshi props/games: skip general scan (only returns combos)
+    # If Kalshi ever offers non-combo individual props, revisit fetch_kalshi_sports
+    kalshi_props = {}
+    kalshi_games = {}
 
+    log_debug(f"  Exchange consensus: Kalshi {len(kalshi_games)} games, Polymarket {len(poly_games)} games")
+
+    # ---- SPORTS (Odds API) ----
     # 1. Player props (event-level) — +EV and arbs
     log_debug("--- Player Props ---")
     for sport, prop_markets, max_ev in PROP_MARKETS:
@@ -1966,29 +1999,8 @@ def scan_markets():
                 all_opps.extend(arbs)
         time.sleep(0.3)
 
-    # 3. Kalshi vs Polymarket cross-exchange
-    log_debug("--- Kalshi vs Polymarket ---")
-    try:
-        cross_opps = fetch_cross_exchange_opps()
-        all_opps.extend(cross_opps)
-    except Exception as e:
-        log_debug(f"  Cross-exchange error: {e}")
-
-    # 4. Weather model vs Kalshi
-    log_debug("--- Weather Markets ---")
-    try:
-        weather_opps = fetch_weather_opps()
-        all_opps.extend(weather_opps)
-    except Exception as e:
-        log_debug(f"  Weather error: {e}")
-
-    # 5. Economic structural arbitrage
-    log_debug("--- Economic Markets ---")
-    try:
-        econ_opps = fetch_econ_opps()
-        all_opps.extend(econ_opps)
-    except Exception as e:
-        log_debug(f"  Economic error: {e}")
+    # Cross-exchange scanner skipped — hits Kalshi /markets again (rate limited)
+    # Weather and econ already ran at top of scan with fresh rate limit budget
 
     # Sort: arbs first, then by edge descending
     type_priority = {'arbitrage': 0, 'cross_exchange': 1, 'weather': 2, 'economic': 3}
