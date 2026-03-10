@@ -1999,6 +1999,75 @@ def key_status():
             results.append({'key': f'...{key[-6:]}', 'status': 'error'})
     return jsonify({'keys': results})
 
+@app.route('/api/kalshi-debug')
+def kalshi_debug():
+    """Diagnostic: discover what Kalshi actually has available."""
+    results = {'series': [], 'sample_markets': [], 'errors': []}
+
+    # 1. Try /series endpoint to list all series
+    try:
+        resp = requests.get(f"{KALSHI_API}/series", timeout=10)
+        if resp.status_code == 200:
+            series_list = resp.json().get('series', [])
+            for s in series_list:
+                ticker = s.get('ticker', '')
+                title = s.get('title', '')
+                cat = s.get('category', '')
+                results['series'].append({
+                    'ticker': ticker,
+                    'title': title,
+                    'category': cat,
+                })
+        else:
+            results['errors'].append(f'/series returned HTTP {resp.status_code}')
+    except Exception as e:
+        results['errors'].append(f'/series error: {str(e)}')
+
+    # 2. Try fetching a page of individual (non-combo) markets
+    try:
+        resp = requests.get(f"{KALSHI_API}/markets",
+            params={'status': 'open', 'limit': 100}, timeout=10)
+        if resp.status_code == 200:
+            mkts = resp.json().get('markets', [])
+            for m in mkts[:50]:
+                title = m.get('title', '')
+                if ',' not in title:  # Non-combo only
+                    results['sample_markets'].append({
+                        'ticker': m.get('ticker', ''),
+                        'series_ticker': m.get('series_ticker', ''),
+                        'event_ticker': m.get('event_ticker', ''),
+                        'title': title[:100],
+                        'subtitle': (m.get('subtitle', '') or '')[:100],
+                        'yes_sub_title': (m.get('yes_sub_title', '') or '')[:100],
+                        'category': m.get('category', ''),
+                        'yes_bid': m.get('yes_bid', 0),
+                        'yes_ask': m.get('yes_ask', 0),
+                        'status': m.get('status', ''),
+                    })
+        else:
+            results['errors'].append(f'/markets returned HTTP {resp.status_code}')
+    except Exception as e:
+        results['errors'].append(f'/markets error: {str(e)}')
+
+    # 3. Filter series for weather/econ/sports keywords
+    weather_series = [s for s in results['series']
+        if any(kw in (s['title'] + s['ticker']).lower()
+        for kw in ['temp', 'weather', 'high', 'low', 'rain', 'snow'])]
+    econ_series = [s for s in results['series']
+        if any(kw in (s['title'] + s['ticker']).lower()
+        for kw in ['fed', 'cpi', 'inflation', 'gdp', 'jobs', 'rate', 'unemployment', 'recession', 'payroll'])]
+    sports_series = [s for s in results['series']
+        if any(kw in (s['title'] + s['ticker'] + s['category']).lower()
+        for kw in ['nba', 'nfl', 'nhl', 'mlb', 'basketball', 'football', 'hockey', 'baseball', 'player', 'prop', 'touchdown'])]
+
+    results['weather_series'] = weather_series
+    results['econ_series'] = econ_series
+    results['sports_series'] = sports_series[:20]  # Limit
+    results['total_series'] = len(results['series'])
+    results['series'] = results['series'][:20]  # Only return first 20 to keep response manageable
+
+    return jsonify(results)
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
