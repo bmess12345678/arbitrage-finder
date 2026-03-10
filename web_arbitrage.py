@@ -1562,17 +1562,43 @@ def fetch_weather_opps():
     opportunities = []
 
     try:
-        # Known Kalshi weather series tickers — query directly instead of scanning
+        # Real Kalshi weather series tickers (from /api/kalshi-debug)
+        # Daily high temps are most actionable for forecast comparison
         WEATHER_SERIES = {
-            'KXHIGHNY':  {'city': 'NYC',     'lat': 40.78, 'lon': -73.97, 'type': 'high'},
-            'KXHIGHCHI': {'city': 'Chicago',  'lat': 41.88, 'lon': -87.63, 'type': 'high'},
-            'KXHIGHMIA': {'city': 'Miami',    'lat': 25.76, 'lon': -80.19, 'type': 'high'},
-            'KXHIGHLA':  {'city': 'LA',       'lat': 34.05, 'lon': -118.24, 'type': 'high'},
-            'KXHIGHAUS': {'city': 'Austin',   'lat': 30.27, 'lon': -97.74, 'type': 'high'},
-            'KXHIGHDEN': {'city': 'Denver',   'lat': 39.74, 'lon': -104.98, 'type': 'high'},
+            # Daily high temperature series
+            'KXHIGHNY':      {'city': 'NYC',       'lat': 40.78, 'lon': -73.97},
+            'KXHIGHNYD':     {'city': 'NYC',       'lat': 40.78, 'lon': -73.97},
+            'KXHIGHCHI':     {'city': 'Chicago',   'lat': 41.88, 'lon': -87.63},
+            'KXHIGHMIA':     {'city': 'Miami',     'lat': 25.76, 'lon': -80.19},
+            'KXHIGHLAX':     {'city': 'LA',        'lat': 34.05, 'lon': -118.24},
+            'KXHIGHAUS':     {'city': 'Austin',    'lat': 30.27, 'lon': -97.74},
+            'KXHIGHDEN':     {'city': 'Denver',    'lat': 39.74, 'lon': -104.98},
+            'KXDENHIGH':     {'city': 'Denver',    'lat': 39.74, 'lon': -104.98},
+            'KXHIGHTDC':     {'city': 'DC',        'lat': 38.90, 'lon': -77.04},
+            'KXHIGHTBOS':    {'city': 'Boston',    'lat': 42.36, 'lon': -71.06},
+            'KXHIGHTHOU':    {'city': 'Houston',   'lat': 29.76, 'lon': -95.37},
+            'KXHIGHTDAL':    {'city': 'Dallas',    'lat': 32.78, 'lon': -96.80},
+            'KXHIGHTLV':     {'city': 'Las Vegas', 'lat': 36.17, 'lon': -115.14},
+            'KXHIGHTPHX':    {'city': 'Phoenix',   'lat': 33.45, 'lon': -112.07},
+            'KXHIGHTSFO':    {'city': 'SF',        'lat': 37.77, 'lon': -122.42},
+            'KXHIGHTSEA':    {'city': 'Seattle',   'lat': 47.61, 'lon': -122.33},
+            'KXHIGHTMIN':    {'city': 'Minneapolis','lat': 44.98, 'lon': -93.27},
+            'KXHIGHTATL':    {'city': 'Atlanta',   'lat': 33.75, 'lon': -84.39},
+            'KXHIGHTOKC':    {'city': 'OKC',       'lat': 35.47, 'lon': -97.52},
+            'KXHIGHTSATX':   {'city': 'San Antonio','lat': 29.42, 'lon': -98.49},
+            'KXHIGHTNOLA':   {'city': 'New Orleans','lat': 29.95, 'lon': -90.07},
+            'KXHOUHIGH':     {'city': 'Houston',   'lat': 29.76, 'lon': -95.37},
+            'KXHIGHTEMPDEN': {'city': 'Denver',    'lat': 39.74, 'lon': -104.98},
+            'KXPHILHIGH':    {'city': 'Philadelphia','lat': 39.95, 'lon': -75.17},
+            'KXHIGHPHIL':    {'city': 'Philadelphia','lat': 39.95, 'lon': -75.17},
+            'HIGHNY':        {'city': 'NYC',       'lat': 40.78, 'lon': -73.97},
+            'HIGHCHI':       {'city': 'Chicago',   'lat': 41.88, 'lon': -87.63},
+            'HIGHMIA':       {'city': 'Miami',     'lat': 25.76, 'lon': -80.19},
+            'HIGHAUS':       {'city': 'Austin',    'lat': 30.27, 'lon': -97.74},
         }
 
         weather_mkts = []
+        series_with_data = 0
         log_debug("  Fetching Kalshi weather via series tickers...")
 
         for series_ticker, info in WEATHER_SERIES.items():
@@ -1582,6 +1608,7 @@ def fetch_weather_opps():
                     timeout=10)
                 if resp.status_code == 200:
                     mkts = resp.json().get('markets', [])
+                    count = 0
                     for m in mkts:
                         if ',' in (m.get('title', '') or ''):
                             continue
@@ -1591,6 +1618,10 @@ def fetch_weather_opps():
                             m['_city_info'] = info
                             m['_series'] = series_ticker
                             weather_mkts.append(m)
+                            count += 1
+                    if count > 0:
+                        series_with_data += 1
+                        log_debug(f"    {series_ticker} ({info['city']}): {count} markets")
                 elif resp.status_code == 429:
                     log_debug(f"  Kalshi rate limited on {series_ticker}, skipping rest")
                     break
@@ -1598,7 +1629,7 @@ def fetch_weather_opps():
             except:
                 continue
 
-        log_debug(f"  Kalshi weather: {len(weather_mkts)} markets from {len(WEATHER_SERIES)} series")
+        log_debug(f"  Kalshi weather: {len(weather_mkts)} markets from {series_with_data}/{len(WEATHER_SERIES)} series")
 
         if not weather_mkts:
             return []
@@ -1733,11 +1764,21 @@ def fetch_econ_opps():
     opportunities = []
 
     try:
-        # Known Kalshi economic series tickers
+        # Real Kalshi economic series tickers (from /api/kalshi-debug)
         ECON_SERIES = [
-            'KXFED', 'KXCPI', 'KXJOBS', 'KXGDP', 'KXINFL',
-            'KXUNRATE', 'KXRECESSION', 'KXPCE', 'KXNFP',
-            'FED', 'FOMC', 'CPI', 'INXD', 'INXW',
+            'KXFED', 'FED', 'KXFEDDECISION', 'FEDDECISION',
+            'KXCPI', 'CPI', 'KXCPICORE', 'CPICORE',
+            'KXCPIYOY', 'CPIYOY', 'KXCPICOREYOY', 'CPICOREYOY',
+            'KXPAYROLLS', 'PAYROLLS', 'KXPROLLS',
+            'KXGDP', 'GDP', 'KXGDPYEAR',
+            'KXRATECUT', 'RATECUT', 'KXRATECUTS', 'RATECUTS',
+            'KXECONSTATU3', 'KXU3',
+            'KXPCECORE', 'PCECORE',
+            'KXRECSSNBER', 'RECSSNBER',
+            'KXFRM', 'FRM',
+            'KXEFFTARIFF', 'KXAVGTARIFF',
+            'KXDOTPLOT', 'DOTPLOT',
+            'KXACPI', 'ACPI', 'KXACPICORE',
         ]
 
         econ_mkts = []
@@ -1750,6 +1791,7 @@ def fetch_econ_opps():
                     timeout=10)
                 if resp.status_code == 200:
                     mkts = resp.json().get('markets', [])
+                    count = 0
                     for m in mkts:
                         if ',' in (m.get('title', '') or ''):
                             continue
@@ -1757,6 +1799,9 @@ def fetch_econ_opps():
                         ya = m.get('yes_ask', 0) or 0
                         if yb > 0 or ya > 0:
                             econ_mkts.append(m)
+                            count += 1
+                    if count > 0:
+                        log_debug(f"    {series}: {count} markets")
                 elif resp.status_code == 429:
                     log_debug(f"  Kalshi rate limited on {series}, stopping econ scan")
                     break
@@ -1802,33 +1847,45 @@ def fetch_econ_opps():
 
             # Check for monotonicity violations
             # For "above X" style: P(above 3%) should be >= P(above 4%)
+            # If ≥3.0% is at 40¢ and ≥3.5% is at 50¢, that's impossible
+            # Trade: BUY YES on lower threshold + BUY NO on higher threshold
+            # Cost: 40¢ + 50¢ = 90¢, guaranteed payout $1 = 10¢ profit
             for i in range(len(parsed) - 1):
-                a = parsed[i]
-                b = parsed[i + 1]
-                # If higher threshold has higher price, that's potentially a violation
+                a = parsed[i]    # Lower threshold (should be more expensive)
+                b = parsed[i + 1]  # Higher threshold (should be cheaper)
+                # If higher threshold has higher price, that's a violation
                 if b['mid'] > a['mid'] + 0.03:  # 3% buffer for noise
                     arb_count += 1
-                    edge = (b['mid'] - a['mid']) * 100
+                    # Cost to arb: buy YES on a + buy NO on b
+                    cost_yes_a = a['mid']  # e.g. 0.40
+                    cost_no_b = 1.0 - b['mid']  # e.g. 0.50
+                    total_cost = cost_yes_a + cost_no_b
+                    if total_cost < 1.0:
+                        profit_pct = round((1.0 - total_cost) * 100, 1)
+                    else:
+                        profit_pct = round((b['mid'] - a['mid']) * 100, 1)
+                    edge = round((b['mid'] - a['mid']) * 100, 1)
+
                     opportunities.append({
-                        'player': f"Structural: {a['title'][:30]} vs {b['title'][:30]}",
+                        'player': f"{a['title'][:40]}",
                         'game': f"Series: {series}",
                         'commence': '',
                         'market': 'Economic',
                         'book': 'Kalshi',
                         'type': 'economic',
-                        'edge': round(edge, 1),
-                        'gross_edge': round(edge, 1),
-                        'recommendation': f"Monotonicity violation",
+                        'edge': edge,
+                        'gross_edge': edge,
+                        'recommendation': f"BUY YES ≥{a['threshold']} at {a['mid']*100:.0f}¢ + BUY NO ≥{b['threshold']} at {(1-b['mid'])*100:.0f}¢",
                         'odds': 0,
-                        'label1_name': f'≥{a["threshold"]}',
+                        'label1_name': f'BUY YES ≥{a["threshold"]}',
                         'label1_value': f'{a["mid"]*100:.0f}¢',
-                        'label2_name': f'≥{b["threshold"]}',
-                        'label2_value': f'{b["mid"]*100:.0f}¢',
-                        'label3_name': 'Spread',
-                        'label3_value': f"+{edge:.1f}%",
+                        'label2_name': f'BUY NO ≥{b["threshold"]}',
+                        'label2_value': f'{(1-b["mid"])*100:.0f}¢',
+                        'label3_name': 'Guaranteed Profit',
+                        'label3_value': f"+{profit_pct}%" if total_cost < 1 else f"+{edge}% spread",
                         'target_prob': round(a['mid'] * 100, 1),
                         'fair_prob': round(b['mid'] * 100, 1),
-                        'juice_display': '—',
+                        'juice_display': f'Cost: {total_cost*100:.0f}¢ → Pays $1',
                         'consensus_books': 0,
                         'kelly_fraction': 0,
                     })
