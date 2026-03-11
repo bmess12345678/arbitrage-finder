@@ -1679,6 +1679,7 @@ def fetch_weather_opps():
         import math
         # Cache forecasts per city to avoid duplicate API calls
         forecast_cache = {}
+        matched_count = 0
 
         for mkt in weather_mkts:
             title = (mkt.get('title', '') or '')
@@ -1717,15 +1718,22 @@ def fetch_weather_opps():
                         'timezone': 'America/New_York',
                     }, timeout=10)
                     if f_resp.status_code != 200:
+                        log_debug(f"    {city_key} forecast: HTTP {f_resp.status_code}")
+                        forecast_cache[city_key] = None
                         continue
                     fdata = f_resp.json()
                     daily = fdata.get('daily', {})
                     maxes = daily.get('temperature_2m_max', [])
                     if not maxes:
+                        log_debug(f"    {city_key} forecast: no max temps in response")
+                        forecast_cache[city_key] = None
                         continue
-                    forecast_cache[city_key] = maxes[1] if len(maxes) > 1 else maxes[0]
+                    # Use tomorrow's forecast (index 1) or today if only 1 day
+                    forecast_cache[city_key] = maxes[0]  # Today's high (most relevant for today's markets)
                     log_debug(f"    {city_key} forecast high: {forecast_cache[city_key]:.0f}°F")
 
+                if forecast_cache.get(city_key) is None:
+                    continue
                 forecast_high = forecast_cache[city_key]
 
                 # Model: assume temperature follows roughly normal distribution
@@ -1747,6 +1755,12 @@ def fetch_weather_opps():
 
                 # Compare
                 edge = (model_prob - k_mid) * 100
+
+                # Log first few comparisons for debugging
+                if len(opportunities) == 0 and matched_count < 3:
+                    log_debug(f"    {city_key} >{threshold:.0f}°F: model={model_prob*100:.1f}% kalshi={k_mid*100:.1f}% edge={edge:+.1f}%")
+                matched_count += 1
+
                 if abs(edge) < 3:
                     continue
 
@@ -1788,7 +1802,7 @@ def fetch_weather_opps():
             except Exception as e:
                 continue
 
-        log_debug(f"  Weather: {len(opportunities)} model-vs-market edges")
+        log_debug(f"  Weather: {matched_count} markets compared, {len(opportunities)} with 3%+ edge")
 
     except Exception as e:
         log_debug(f"  Weather error: {e}")
@@ -1965,6 +1979,7 @@ def fetch_econ_opps():
 
         # 3. Fetch Polymarket econ markets
         poly_mkts = []
+        poly_unmatched_sample = []
         try:
             resp = requests.get(f"{POLYMARKET_API}/markets",
                 params={'closed': 'false', 'limit': 500, 'active': 'true'},
@@ -1975,6 +1990,9 @@ def fetch_econ_opps():
                     q = m.get('question', '') or ''
                     topic = _topic_tag(q)
                     if not topic:
+                        # Collect samples of unmatched titles for debugging
+                        if len(poly_unmatched_sample) < 5:
+                            poly_unmatched_sample.append(q[:60])
                         continue
                     outcomes = m.get('outcomes', '[]')
                     prices = m.get('outcomePrices', '[]')
@@ -2002,12 +2020,15 @@ def fetch_econ_opps():
             log_debug(f"  Polymarket error: {e}")
 
         log_debug(f"  Polymarket: {len(poly_mkts)} econ markets")
+        if not poly_mkts and poly_unmatched_sample:
+            log_debug(f"    Sample unmatched Poly titles: {poly_unmatched_sample[:3]}")
 
         # 4. For each Kalshi market, build weighted consensus and find +EV
         from difflib import SequenceMatcher
         matched = 0
         fed_matched = 0
         min_edge = 3.0  # Higher threshold than sports (fewer sources, less confidence)
+        fed_sample_logged = 0
 
         for km in econ_mkts:
             k_title = km.get('title', '')
@@ -2019,8 +2040,13 @@ def fetch_econ_opps():
             ya = km.get('yes_ask', 0) or 0
             k_mid = ((yb + ya) / 2 if yb > 0 and ya > 0 else yb or ya) / 100.0
 
+            # Debug: log first 3 Fed market prices
+            if k_topic == 'fed' and fed_sample_logged < 3:
+                log_debug(f"    Fed market: '{k_title[:50]}' → mid={k_mid*100:.1f}%")
+                fed_sample_logged += 1
+
             if k_mid <= 0.03 or k_mid >= 0.97:
-                continue
+                continue  # Skip extreme prices (counted below)
 
             # --- Build consensus fair probability ---
             # Sources with weights (same approach as sports: weighted average)
@@ -2080,7 +2106,7 @@ def fetch_econ_opps():
             if not sources:
                 continue
 
-            # C) Weighted consensus (same as sports devig approach)
+            # C) Weighted consensus
             total_weight = sum(w for _, w, _ in sources)
             fair_prob = sum(p * w for p, w, _ in sources) / total_weight
 
