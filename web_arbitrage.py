@@ -1842,83 +1842,102 @@ def fetch_econ_opps():
         log_debug(f"  Kalshi: {len(econ_mkts)} economic markets found")
 
         # Check for structural arbitrages: monotonicity violations
-        # Group by series (e.g., all CPI markets for the same release)
+        # Only works on "above X" / "over X" / "at least X" style markets
+        # NOT bucket markets ("between X and Y")
         from collections import defaultdict
-        series_groups = defaultdict(list)
+        event_groups = defaultdict(list)
         for m in econ_mkts:
-            st = m.get('series_ticker', '') or m.get('event_ticker', '') or 'other'
-            series_groups[st].append(m)
+            et = m.get('event_ticker', '')
+            title = (m.get('title', '') or '').lower()
+            # Only include markets that are clearly "above threshold" style
+            is_above = any(kw in title for kw in ['above', 'over', 'higher', 'at least',
+                'or more', 'exceed', 'greater', '≥', '>='])
+            # Exclude bucket-style ("between X and Y")
+            is_bucket = 'between' in title or re.search(r'\d.*\s+to\s+\d', title) is not None
+            if et and is_above and not is_bucket:
+                event_groups[et].append(m)
+
+        above_count = sum(len(v) for v in event_groups.values())
+        log_debug(f"  {above_count} of {len(econ_mkts)} are 'above/over' style (rest are buckets, skipped)")
 
         arb_count = 0
-        for series, mkts in series_groups.items():
+        for event, mkts in event_groups.items():
             if len(mkts) < 2:
                 continue
 
-            # Extract thresholds and prices
+            # Extract thresholds and EXECUTABLE prices (ask to buy YES, ask to buy NO)
             parsed = []
             for m in mkts:
                 title = m.get('title', '')
-                yb = m.get('yes_bid', 0) or 0
-                ya = m.get('yes_ask', 0) or 0
-                mid = ((yb + ya) / 2 if yb > 0 and ya > 0 else yb or ya) / 100.0
+                yb = m.get('yes_bid', 0) or 0  # Price to sell YES / buy NO
+                ya = m.get('yes_ask', 0) or 0  # Price to buy YES
+
+                if ya <= 0 or yb <= 0:
+                    continue  # Need both sides for executable arb
 
                 # Try to extract a numeric threshold
                 nums = re.findall(r'(\d+(?:\.\d+)?)\s*%?', title)
                 if nums:
-                    threshold = float(nums[-1])  # Last number is usually the threshold
-                    parsed.append({'title': title, 'threshold': threshold,
-                                  'mid': mid, 'yb': yb, 'ya': ya, 'ticker': m.get('ticker', '')})
+                    threshold = float(nums[-1])
+                    parsed.append({
+                        'title': title,
+                        'threshold': threshold,
+                        'yes_ask': ya / 100.0,    # Cost to buy YES
+                        'no_ask': (100 - yb) / 100.0,  # Cost to buy NO = 1 - yes_bid
+                        'mid': ((yb + ya) / 2) / 100.0,
+                        'yb': yb, 'ya': ya,
+                        'ticker': m.get('ticker', ''),
+                    })
 
             if len(parsed) < 2:
                 continue
 
-            # Sort by threshold
+            # Sort by threshold ascending
             parsed.sort(key=lambda x: x['threshold'])
 
-            # Check for monotonicity violations
-            # For "above X" style: P(above 3%) should be >= P(above 4%)
-            # If ≥3.0% is at 40¢ and ≥3.5% is at 50¢, that's impossible
-            # Trade: BUY YES on lower threshold + BUY NO on higher threshold
-            # Cost: 40¢ + 50¢ = 90¢, guaranteed payout $1 = 10¢ profit
+            # Check: for "above" markets, P(above lower) >= P(above higher)
+            # A violation means you can buy YES on lower threshold + NO on higher threshold
+            # Use executable prices (ask) and require profit after ~2% Kalshi fee
             for i in range(len(parsed) - 1):
-                a = parsed[i]    # Lower threshold (should be more expensive)
-                b = parsed[i + 1]  # Higher threshold (should be cheaper)
-                # If higher threshold has higher price, that's a violation
-                if b['mid'] > a['mid'] + 0.03:  # 3% buffer for noise
-                    arb_count += 1
-                    # Cost to arb: buy YES on a + buy NO on b
-                    cost_yes_a = a['mid']  # e.g. 0.40
-                    cost_no_b = 1.0 - b['mid']  # e.g. 0.50
-                    total_cost = cost_yes_a + cost_no_b
-                    if total_cost < 1.0:
-                        profit_pct = round((1.0 - total_cost) * 100, 1)
-                    else:
-                        profit_pct = round((b['mid'] - a['mid']) * 100, 1)
-                    edge = round((b['mid'] - a['mid']) * 100, 1)
+                a = parsed[i]    # Lower threshold (should cost more to buy YES)
+                b = parsed[i + 1]  # Higher threshold (should cost less)
 
-                    opportunities.append({
-                        'player': f"{a['title'][:40]}",
-                        'game': f"Series: {series}",
-                        'commence': '',
-                        'market': 'Economic',
-                        'book': 'Kalshi',
-                        'type': 'economic',
-                        'edge': edge,
-                        'gross_edge': edge,
-                        'recommendation': f"BUY YES ≥{a['threshold']} at {a['mid']*100:.0f}¢ + BUY NO ≥{b['threshold']} at {(1-b['mid'])*100:.0f}¢",
-                        'odds': 0,
-                        'label1_name': f'BUY YES ≥{a["threshold"]}',
-                        'label1_value': f'{a["mid"]*100:.0f}¢',
-                        'label2_name': f'BUY NO ≥{b["threshold"]}',
-                        'label2_value': f'{(1-b["mid"])*100:.0f}¢',
-                        'label3_name': 'Guaranteed Profit',
-                        'label3_value': f"+{profit_pct}%" if total_cost < 1 else f"+{edge}% spread",
-                        'target_prob': round(a['mid'] * 100, 1),
-                        'fair_prob': round(b['mid'] * 100, 1),
-                        'juice_display': f'Cost: {total_cost*100:.0f}¢ → Pays $1',
-                        'consensus_books': 0,
-                        'kelly_fraction': 0,
-                    })
+                # Actual cost to execute:
+                # Buy YES on a: pay a['yes_ask']
+                # Buy NO on b: pay b['no_ask'] = 1 - b['yes_bid']/100
+                cost = a['yes_ask'] + b['no_ask']
+
+                # After Kalshi fee (~2%), need cost < 0.96 to profit
+                if cost < 0.96:
+                    profit = 1.0 - cost
+                    profit_after_fee = profit - 0.02  # Conservative fee estimate
+                    if profit_after_fee > 0:
+                        arb_count += 1
+                        profit_pct = round(profit_after_fee * 100, 1)
+
+                        opportunities.append({
+                            'player': f"{a['title'][:50]}",
+                            'game': f"Event: {event}",
+                            'commence': '',
+                            'market': 'Economic',
+                            'book': 'Kalshi',
+                            'type': 'economic',
+                            'edge': profit_pct,
+                            'gross_edge': round(profit * 100, 1),
+                            'recommendation': f"BUY YES ≥{a['threshold']} at {a['ya']}¢ + BUY NO ≥{b['threshold']} at {100-b['yb']}¢ = {cost*100:.0f}¢ cost → $1 payout",
+                            'odds': 0,
+                            'label1_name': f'BUY YES ≥{a["threshold"]}',
+                            'label1_value': f'{a["ya"]}¢ (ask)',
+                            'label2_name': f'BUY NO ≥{b["threshold"]}',
+                            'label2_value': f'{100-b["yb"]}¢ (ask)',
+                            'label3_name': f'Profit (after ~2% fee)',
+                            'label3_value': f"+{profit_pct}%",
+                            'target_prob': round(cost * 100, 1),
+                            'fair_prob': 100.0,
+                            'juice_display': f'{a["ya"]}¢ + {100-b["yb"]}¢ = {cost*100:.0f}¢ → $1',
+                            'consensus_books': 0,
+                            'kelly_fraction': 0,
+                        })
 
         # Also surface wide bid-ask spreads as manual review opportunities
         wide_spread = []
