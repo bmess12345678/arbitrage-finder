@@ -1605,13 +1605,29 @@ def fetch_weather_opps():
                     timeout=10)
                 if resp.status_code == 200:
                     mkts = resp.json().get('markets', [])
+                    # Debug: log first market's fields for first series
+                    if mkts and series_with_data == 0 and len(weather_mkts) == 0:
+                        sample = mkts[0]
+                        price_fields = {k: v for k, v in sample.items() if any(
+                            w in k.lower() for w in ['price', 'bid', 'ask', 'yes', 'no', 'last', 'volume'])}
+                        log_debug(f"    DEBUG {series_ticker}: {len(mkts)} raw markets, sample title: {sample.get('title', '?')[:60]}")
+                        log_debug(f"    DEBUG price fields: {price_fields}")
                     count = 0
                     for m in mkts:
                         if ',' in (m.get('title', '') or ''):
                             continue
+                        # Accept any price indicator: bid/ask, yes_price, last_price
                         yb = m.get('yes_bid', 0) or 0
                         ya = m.get('yes_ask', 0) or 0
-                        if yb > 0 or ya > 0:
+                        yp = m.get('yes_price', 0) or 0
+                        lp = m.get('last_price', 0) or 0
+                        vol = m.get('volume', 0) or 0
+                        has_price = yb > 0 or ya > 0 or yp > 0 or lp > 0
+                        if has_price:
+                            # Normalize: use bid/ask if available, fall back to yes_price
+                            if yb == 0 and ya == 0 and yp > 0:
+                                m['yes_bid'] = yp
+                                m['yes_ask'] = yp
                             m['_city_info'] = info
                             m['_series'] = series_ticker
                             weather_mkts.append(m)
@@ -1619,6 +1635,8 @@ def fetch_weather_opps():
                     if count > 0:
                         series_with_data += 1
                         log_debug(f"    {series_ticker} ({info['city']}): {count} markets")
+                    elif mkts:
+                        log_debug(f"    {series_ticker} ({info['city']}): {len(mkts)} raw but 0 with prices")
                 elif resp.status_code == 429:
                     log_debug(f"  Kalshi rate limited on {series_ticker}, waiting 5s...")
                     time.sleep(5)
@@ -1633,7 +1651,12 @@ def fetch_weather_opps():
                                 continue
                             yb = m.get('yes_bid', 0) or 0
                             ya = m.get('yes_ask', 0) or 0
-                            if yb > 0 or ya > 0:
+                            yp = m.get('yes_price', 0) or 0
+                            has_price = yb > 0 or ya > 0 or yp > 0
+                            if has_price:
+                                if yb == 0 and ya == 0 and yp > 0:
+                                    m['yes_bid'] = yp
+                                    m['yes_ask'] = yp
                                 m['_city_info'] = info
                                 m['_series'] = series_ticker
                                 weather_mkts.append(m)
@@ -1644,8 +1667,11 @@ def fetch_weather_opps():
                     else:
                         log_debug(f"  Kalshi still rate limited, skipping remaining weather")
                         break
+                else:
+                    log_debug(f"    {series_ticker}: HTTP {resp.status_code}")
                 time.sleep(0.5)
-            except:
+            except Exception as e:
+                log_debug(f"    {series_ticker}: error {e}")
                 continue
 
         log_debug(f"  Kalshi weather: {len(weather_mkts)} markets from {series_with_data}/{len(WEATHER_SERIES)} series")
@@ -1841,119 +1867,12 @@ def fetch_econ_opps():
 
         log_debug(f"  Kalshi: {len(econ_mkts)} economic markets found")
 
-        # Check for structural arbitrages: monotonicity violations
-        # Only works on "above X" / "over X" / "at least X" style markets
-        # NOT bucket markets ("between X and Y")
-        from collections import defaultdict
-        event_groups = defaultdict(list)
-        for m in econ_mkts:
-            et = m.get('event_ticker', '')
-            title = (m.get('title', '') or '').lower()
-            # Only include markets that are clearly "above threshold" style
-            is_above = any(kw in title for kw in ['above', 'over', 'higher', 'at least',
-                'or more', 'exceed', 'greater', '≥', '>='])
-            # Exclude bucket-style ("between X and Y")
-            is_bucket = 'between' in title or re.search(r'\d.*\s+to\s+\d', title) is not None
-            if et and is_above and not is_bucket:
-                event_groups[et].append(m)
+        # Econ structural arb scanner removed — threshold parsing is too fragile
+        # and produces false positives on thinly-traded markets with stale bids.
+        # The wide bid-ask spreads on Kalshi econ markets mean executable prices
+        # are far from mid-prices, making automated arb detection unreliable.
 
-        above_count = sum(len(v) for v in event_groups.values())
-        log_debug(f"  {above_count} of {len(econ_mkts)} are 'above/over' style (rest are buckets, skipped)")
-
-        arb_count = 0
-        for event, mkts in event_groups.items():
-            if len(mkts) < 2:
-                continue
-
-            # Extract thresholds and EXECUTABLE prices (ask to buy YES, ask to buy NO)
-            parsed = []
-            for m in mkts:
-                title = m.get('title', '')
-                yb = m.get('yes_bid', 0) or 0  # Price to sell YES / buy NO
-                ya = m.get('yes_ask', 0) or 0  # Price to buy YES
-
-                if ya <= 0 or yb <= 0:
-                    continue  # Need both sides for executable arb
-
-                # Try to extract a numeric threshold
-                nums = re.findall(r'(\d+(?:\.\d+)?)\s*%?', title)
-                if nums:
-                    threshold = float(nums[-1])
-                    parsed.append({
-                        'title': title,
-                        'threshold': threshold,
-                        'yes_ask': ya / 100.0,    # Cost to buy YES
-                        'no_ask': (100 - yb) / 100.0,  # Cost to buy NO = 1 - yes_bid
-                        'mid': ((yb + ya) / 2) / 100.0,
-                        'yb': yb, 'ya': ya,
-                        'ticker': m.get('ticker', ''),
-                    })
-
-            if len(parsed) < 2:
-                continue
-
-            # Sort by threshold ascending
-            parsed.sort(key=lambda x: x['threshold'])
-
-            # Check: for "above" markets, P(above lower) >= P(above higher)
-            # A violation means you can buy YES on lower threshold + NO on higher threshold
-            # Use executable prices (ask) and require profit after ~2% Kalshi fee
-            for i in range(len(parsed) - 1):
-                a = parsed[i]    # Lower threshold (should cost more to buy YES)
-                b = parsed[i + 1]  # Higher threshold (should cost less)
-
-                # Actual cost to execute:
-                # Buy YES on a: pay a['yes_ask']
-                # Buy NO on b: pay b['no_ask'] = 1 - b['yes_bid']/100
-                cost = a['yes_ask'] + b['no_ask']
-
-                # After Kalshi fee (~2%), need cost < 0.96 to profit
-                if cost < 0.96:
-                    profit = 1.0 - cost
-                    profit_after_fee = profit - 0.02  # Conservative fee estimate
-                    if profit_after_fee > 0:
-                        arb_count += 1
-                        profit_pct = round(profit_after_fee * 100, 1)
-
-                        opportunities.append({
-                            'player': f"{a['title'][:50]}",
-                            'game': f"Event: {event}",
-                            'commence': '',
-                            'market': 'Economic',
-                            'book': 'Kalshi',
-                            'type': 'economic',
-                            'edge': profit_pct,
-                            'gross_edge': round(profit * 100, 1),
-                            'recommendation': f"BUY YES ≥{a['threshold']} at {a['ya']}¢ + BUY NO ≥{b['threshold']} at {100-b['yb']}¢ = {cost*100:.0f}¢ cost → $1 payout",
-                            'odds': 0,
-                            'label1_name': f'BUY YES ≥{a["threshold"]}',
-                            'label1_value': f'{a["ya"]}¢ (ask)',
-                            'label2_name': f'BUY NO ≥{b["threshold"]}',
-                            'label2_value': f'{100-b["yb"]}¢ (ask)',
-                            'label3_name': f'Profit (after ~2% fee)',
-                            'label3_value': f"+{profit_pct}%",
-                            'target_prob': round(cost * 100, 1),
-                            'fair_prob': 100.0,
-                            'juice_display': f'{a["ya"]}¢ + {100-b["yb"]}¢ = {cost*100:.0f}¢ → $1',
-                            'consensus_books': 0,
-                            'kelly_fraction': 0,
-                        })
-
-        # Also surface wide bid-ask spreads as manual review opportunities
-        wide_spread = []
-        for m in econ_mkts:
-            yb = m.get('yes_bid', 0) or 0
-            ya = m.get('yes_ask', 0) or 0
-            if yb > 0 and ya > 0:
-                spread = ya - yb
-                mid = (yb + ya) / 2
-                if spread >= 8 and 15 < mid < 85:  # Wide spread, mid-range price
-                    wide_spread.append(m)
-
-        if wide_spread:
-            log_debug(f"  Economic: {len(wide_spread)} markets with wide spreads (≥8¢) for manual review")
-
-        log_debug(f"  Economic: {len(econ_mkts)} markets, {arb_count} structural arbs, {len(opportunities)} opportunities")
+        log_debug(f"  Economic: {len(econ_mkts)} markets scanned, arb scanner disabled (unreliable)")
 
     except Exception as e:
         log_debug(f"  Economic error: {e}")
