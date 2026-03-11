@@ -1706,9 +1706,10 @@ def fetch_weather_opps():
             ya = mkt.get('yes_ask', 0) or 0
             k_mid = ((yb + ya) / 2 if yb > 0 and ya > 0 else yb or ya) / 100.0
 
-            # 3. Fetch forecast from Open-Meteo (cached per city)
+            # 3. Fetch forecast from Open-Meteo (cached per city, with rate limit respect)
             try:
                 if city_key not in forecast_cache:
+                    time.sleep(0.5)  # Respect Open-Meteo rate limit
                     f_resp = requests.get(OPEN_METEO_API, params={
                         'latitude': city_info['lat'],
                         'longitude': city_info['lon'],
@@ -1718,9 +1719,20 @@ def fetch_weather_opps():
                         'timezone': 'America/New_York',
                     }, timeout=10)
                     if f_resp.status_code != 200:
-                        log_debug(f"    {city_key} forecast: HTTP {f_resp.status_code}")
-                        forecast_cache[city_key] = None
-                        continue
+                        if f_resp.status_code == 429:
+                            time.sleep(3)
+                            f_resp = requests.get(OPEN_METEO_API, params={
+                                'latitude': city_info['lat'],
+                                'longitude': city_info['lon'],
+                                'daily': 'temperature_2m_max,temperature_2m_min',
+                                'temperature_unit': 'fahrenheit',
+                                'forecast_days': 3,
+                                'timezone': 'America/New_York',
+                            }, timeout=10)
+                        if f_resp.status_code != 200:
+                            log_debug(f"    {city_key} forecast: HTTP {f_resp.status_code}")
+                            forecast_cache[city_key] = None
+                            continue
                     fdata = f_resp.json()
                     daily = fdata.get('daily', {})
                     maxes = daily.get('temperature_2m_max', [])
@@ -1827,17 +1839,18 @@ def _econ_keywords(title):
 def _topic_tag(title):
     """Classify a market title into an economic topic."""
     t = title.lower()
-    if any(w in t for w in ['fed ', 'fomc', 'rate cut', 'rate hike', 'interest rate', 'federal reserve']):
+    if any(w in t for w in ['fed', 'fomc', 'rate cut', 'rate hike', 'interest rate',
+        'federal reserve', 'federal funds', 'target rate', 'basis point', 'bps']):
         return 'fed'
-    if any(w in t for w in ['cpi', 'inflation', 'consumer price']):
+    if any(w in t for w in ['cpi', 'inflation', 'consumer price', 'price index']):
         return 'cpi'
-    if any(w in t for w in ['job', 'payroll', 'nonfarm', 'employment', 'unemployment']):
+    if any(w in t for w in ['job', 'payroll', 'nonfarm', 'employment', 'unemployment', 'labor']):
         return 'jobs'
-    if any(w in t for w in ['gdp', 'gross domestic']):
+    if any(w in t for w in ['gdp', 'gross domestic', 'economic growth']):
         return 'gdp'
-    if any(w in t for w in ['recession']):
+    if any(w in t for w in ['recession', 'economic downturn']):
         return 'recession'
-    if any(w in t for w in ['tariff', 'trade war']):
+    if any(w in t for w in ['tariff', 'trade war', 'trade deal', 'trade deficit']):
         return 'tariff'
     if any(w in t for w in ['pce', 'personal consumption']):
         return 'pce'
@@ -1858,8 +1871,8 @@ def _extract_month(title):
 def _is_fed_rate_market(title):
     """Check if this Kalshi market is about Fed rate decisions."""
     t = title.lower()
-    return any(w in t for w in ['fed ', 'fomc', 'rate cut', 'rate hike', 'interest rate',
-        'federal reserve', 'federal funds', 'rate decision', 'rate hold', 'basis point'])
+    return any(w in t for w in ['fed', 'fomc', 'rate cut', 'rate hike', 'interest rate',
+        'federal reserve', 'federal funds', 'target rate', 'basis point', 'bps'])
 
 def fetch_fedwatch_probs():
     """Fetch CME FedWatch implied probabilities from free aggregator.
@@ -1977,6 +1990,11 @@ def fetch_econ_opps():
 
         log_debug(f"  Kalshi: {len(econ_mkts)} economic markets")
 
+        # Debug: show sample Kalshi econ titles
+        if econ_mkts:
+            samples = [m.get('title', '')[:60] for m in econ_mkts[:3]]
+            log_debug(f"    Sample Kalshi titles: {samples}")
+
         # 3. Fetch Polymarket econ markets
         poly_mkts = []
         poly_unmatched_sample = []
@@ -2029,11 +2047,15 @@ def fetch_econ_opps():
         fed_matched = 0
         min_edge = 3.0  # Higher threshold than sports (fewer sources, less confidence)
         fed_sample_logged = 0
+        no_topic_count = 0
+        extreme_price_count = 0
+        no_source_count = 0
 
         for km in econ_mkts:
             k_title = km.get('title', '')
             k_topic = _topic_tag(k_title)
             if not k_topic:
+                no_topic_count += 1
                 continue
 
             yb = km.get('yes_bid', 0) or 0
@@ -2042,11 +2064,12 @@ def fetch_econ_opps():
 
             # Debug: log first 3 Fed market prices
             if k_topic == 'fed' and fed_sample_logged < 3:
-                log_debug(f"    Fed market: '{k_title[:50]}' → mid={k_mid*100:.1f}%")
+                log_debug(f"    Fed: '{k_title[:55]}' → {k_mid*100:.1f}%")
                 fed_sample_logged += 1
 
             if k_mid <= 0.03 or k_mid >= 0.97:
-                continue  # Skip extreme prices (counted below)
+                extreme_price_count += 1
+                continue
 
             # --- Build consensus fair probability ---
             # Sources with weights (same approach as sports: weighted average)
@@ -2104,6 +2127,7 @@ def fetch_econ_opps():
 
             # Need at least 1 consensus source
             if not sources:
+                no_source_count += 1
                 continue
 
             # C) Weighted consensus
@@ -2163,7 +2187,7 @@ def fetch_econ_opps():
                 'kelly_fraction': round(quarter_kelly(fair_prob, bet_odds) * 100, 2) if bet_odds != 0 else 0,
             })
 
-        log_debug(f"  Econ consensus: {matched} +EV ({fed_matched} Fed w/ FedWatch), {len(opportunities)} above {min_edge}% threshold")
+        log_debug(f"  Econ: {no_topic_count} no-topic, {extreme_price_count} extreme-price, {no_source_count} no-consensus → {matched} with sources, {len(opportunities)} above {min_edge}%")
 
     except Exception as e:
         log_debug(f"  Economic error: {e}")
