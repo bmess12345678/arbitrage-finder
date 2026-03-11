@@ -1614,8 +1614,6 @@ def fetch_weather_opps():
                         log_debug(f"    DEBUG price fields: {price_fields}")
                     count = 0
                     for m in mkts:
-                        if ',' in (m.get('title', '') or ''):
-                            continue
                         # Accept any price indicator: bid/ask, yes_price, last_price
                         yb = m.get('yes_bid', 0) or 0
                         ya = m.get('yes_ask', 0) or 0
@@ -1647,8 +1645,6 @@ def fetch_weather_opps():
                         mkts = resp.json().get('markets', [])
                         count = 0
                         for m in mkts:
-                            if ',' in (m.get('title', '') or ''):
-                                continue
                             yb = m.get('yes_bid', 0) or 0
                             ya = m.get('yes_ask', 0) or 0
                             yp = m.get('yes_price', 0) or 0
@@ -1669,7 +1665,7 @@ def fetch_weather_opps():
                         break
                 else:
                     log_debug(f"    {series_ticker}: HTTP {resp.status_code}")
-                time.sleep(0.5)
+                time.sleep(1.5)
             except Exception as e:
                 log_debug(f"    {series_ticker}: error {e}")
                 continue
@@ -1801,15 +1797,115 @@ def fetch_weather_opps():
 
 
 # ============================================================
-# ECONOMIC DATA SCANNER (Kalshi markets + public signals)
+# ECONOMIC DATA SCANNER
+# CME FedWatch (3x) + Polymarket (2x) → weighted consensus vs Kalshi
+# Same methodology as sports: leave-one-out weighted consensus
 # ============================================================
 
+def _econ_keywords(title):
+    """Extract normalized keywords from a market title for matching."""
+    t = re.sub(r'[^a-z0-9%\s.]', '', title.lower())
+    stop = {'will', 'the', 'be', 'a', 'an', 'in', 'on', 'at', 'to', 'of',
+            'for', 'is', 'it', 'by', 'or', 'and', 'this', 'that', 'than', 'more'}
+    words = [w for w in t.split() if w not in stop and len(w) > 1]
+    return set(words)
+
+def _topic_tag(title):
+    """Classify a market title into an economic topic."""
+    t = title.lower()
+    if any(w in t for w in ['fed ', 'fomc', 'rate cut', 'rate hike', 'interest rate', 'federal reserve']):
+        return 'fed'
+    if any(w in t for w in ['cpi', 'inflation', 'consumer price']):
+        return 'cpi'
+    if any(w in t for w in ['job', 'payroll', 'nonfarm', 'employment', 'unemployment']):
+        return 'jobs'
+    if any(w in t for w in ['gdp', 'gross domestic']):
+        return 'gdp'
+    if any(w in t for w in ['recession']):
+        return 'recession'
+    if any(w in t for w in ['tariff', 'trade war']):
+        return 'tariff'
+    if any(w in t for w in ['pce', 'personal consumption']):
+        return 'pce'
+    return None
+
+def _extract_month(title):
+    """Extract month reference from title for matching."""
+    months = {'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+              'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12,
+              'january': 1, 'february': 2, 'march': 3, 'april': 4, 'june': 6,
+              'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11, 'december': 12}
+    t = title.lower()
+    for name, num in months.items():
+        if name in t:
+            return num
+    return None
+
+def _is_fed_rate_market(title):
+    """Check if this Kalshi market is about Fed rate decisions."""
+    t = title.lower()
+    return any(w in t for w in ['fed ', 'fomc', 'rate cut', 'rate hike', 'interest rate',
+        'federal reserve', 'federal funds', 'rate decision', 'rate hold', 'basis point'])
+
+def fetch_fedwatch_probs():
+    """Fetch CME FedWatch implied probabilities from free aggregator.
+    Returns dict: {'hold': 0.94, 'cut_25': 0.06, 'cut_50': 0.0, 'hike': 0.0, 'source': 'growbeansprout'}
+    Falls back gracefully if unavailable."""
+    try:
+        resp = requests.get('https://growbeansprout.com/tools/fedwatch', timeout=10,
+            headers={'User-Agent': 'Mozilla/5.0'})
+        if resp.status_code != 200:
+            return None
+        html = resp.text
+
+        # Parse probability percentages from the page
+        # Look for patterns like "98.9% probability" or "X% chance" near "hold"/"cut"/"hike"
+        import re as _re
+
+        # Try to find the main probability statement
+        # "there is a X% probability that the US Federal Reserve will..."
+        m = _re.search(r'(\d+\.?\d*)%\s*probability.*?(?:cut|hold|unchanged|steady|maintain|raise|hike)', html, _re.IGNORECASE | _re.DOTALL)
+        if not m:
+            # Try alternative pattern
+            m = _re.search(r'(?:cut|hold|unchanged|steady|maintain|raise|hike).*?(\d+\.?\d*)%', html, _re.IGNORECASE | _re.DOTALL)
+
+        if not m:
+            return None
+
+        prob = float(m.group(1)) / 100.0
+        text_after = html[m.start():m.end() + 100].lower()
+
+        # Determine if this probability is for a cut or a hold
+        result = {'hold': 0.0, 'cut_25': 0.0, 'cut_50': 0.0, 'hike': 0.0, 'source': 'growbeansprout'}
+        if any(w in text_after for w in ['cut', 'lower', 'reduce', 'ease']):
+            result['cut_25'] = prob
+            result['hold'] = round(1.0 - prob, 4)
+        elif any(w in text_after for w in ['hold', 'unchanged', 'steady', 'maintain', 'no change']):
+            result['hold'] = prob
+            result['cut_25'] = round(1.0 - prob, 4)
+        elif any(w in text_after for w in ['hike', 'raise', 'increase']):
+            result['hike'] = prob
+            result['hold'] = round(1.0 - prob, 4)
+
+        return result
+
+    except Exception:
+        return None
+
 def fetch_econ_opps():
-    """Find Kalshi economic markets and flag any with obvious mispricings."""
+    """Find +EV econ bets: CME FedWatch (3x) + Polymarket (2x) consensus vs Kalshi.
+    Same methodology as sports scanner: weighted consensus = fair value."""
     opportunities = []
 
     try:
-        # Real Kalshi economic series tickers — most liquid/actionable only
+        # 1. Fetch CME FedWatch probabilities (sharpest signal for Fed markets)
+        fedwatch = fetch_fedwatch_probs()
+        if fedwatch:
+            log_debug(f"  CME FedWatch: hold={fedwatch['hold']*100:.1f}%, cut={fedwatch['cut_25']*100:.1f}% (via {fedwatch['source']})")
+        else:
+            log_debug("  CME FedWatch: unavailable (will use Polymarket only for Fed markets)")
+
+        # 2. Fetch Kalshi econ markets
         ECON_SERIES = [
             'KXFED', 'FED', 'FEDDECISION',
             'KXCPI', 'CPI', 'KXCPICORE',
@@ -1819,7 +1915,7 @@ def fetch_econ_opps():
         ]
 
         econ_mkts = []
-        log_debug("  Fetching Kalshi economic markets via series tickers...")
+        log_debug("  Fetching Kalshi economic markets...")
 
         for series in ECON_SERIES:
             try:
@@ -1830,11 +1926,13 @@ def fetch_econ_opps():
                     mkts = resp.json().get('markets', [])
                     count = 0
                     for m in mkts:
-                        if ',' in (m.get('title', '') or ''):
-                            continue
                         yb = m.get('yes_bid', 0) or 0
                         ya = m.get('yes_ask', 0) or 0
-                        if yb > 0 or ya > 0:
+                        yp = m.get('yes_price', 0) or m.get('last_price', 0) or 0
+                        if yb > 0 or ya > 0 or yp > 0:
+                            if yb == 0 and ya == 0 and yp > 0:
+                                m['yes_bid'] = yp
+                                m['yes_ask'] = yp
                             econ_mkts.append(m)
                             count += 1
                     if count > 0:
@@ -1849,8 +1947,6 @@ def fetch_econ_opps():
                         mkts = resp.json().get('markets', [])
                         count = 0
                         for m in mkts:
-                            if ',' in (m.get('title', '') or ''):
-                                continue
                             yb = m.get('yes_bid', 0) or 0
                             ya = m.get('yes_ask', 0) or 0
                             if yb > 0 or ya > 0:
@@ -1861,18 +1957,187 @@ def fetch_econ_opps():
                     else:
                         log_debug(f"  Kalshi still rate limited, skipping remaining econ")
                         break
-                time.sleep(0.5)
+                time.sleep(1.5)
             except:
                 continue
 
-        log_debug(f"  Kalshi: {len(econ_mkts)} economic markets found")
+        log_debug(f"  Kalshi: {len(econ_mkts)} economic markets")
 
-        # Econ structural arb scanner removed — threshold parsing is too fragile
-        # and produces false positives on thinly-traded markets with stale bids.
-        # The wide bid-ask spreads on Kalshi econ markets mean executable prices
-        # are far from mid-prices, making automated arb detection unreliable.
+        # 3. Fetch Polymarket econ markets
+        poly_mkts = []
+        try:
+            resp = requests.get(f"{POLYMARKET_API}/markets",
+                params={'closed': 'false', 'limit': 500, 'active': 'true'},
+                timeout=15)
+            if resp.status_code == 200:
+                import json as _json
+                for m in resp.json():
+                    q = m.get('question', '') or ''
+                    topic = _topic_tag(q)
+                    if not topic:
+                        continue
+                    outcomes = m.get('outcomes', '[]')
+                    prices = m.get('outcomePrices', '[]')
+                    if isinstance(outcomes, str):
+                        try:
+                            outcomes = _json.loads(outcomes)
+                            prices = _json.loads(prices)
+                        except:
+                            continue
+                    if len(outcomes) >= 2 and len(prices) >= 2:
+                        try:
+                            yes_price = float(prices[0])
+                        except:
+                            continue
+                        if 0.03 < yes_price < 0.97:
+                            poly_mkts.append({
+                                'title': q,
+                                'yes_price': yes_price,
+                                'topic': topic,
+                                'month': _extract_month(q),
+                                'keywords': _econ_keywords(q),
+                                'volume': float(m.get('volume', 0) or 0),
+                            })
+        except Exception as e:
+            log_debug(f"  Polymarket error: {e}")
 
-        log_debug(f"  Economic: {len(econ_mkts)} markets scanned, arb scanner disabled (unreliable)")
+        log_debug(f"  Polymarket: {len(poly_mkts)} econ markets")
+
+        # 4. For each Kalshi market, build weighted consensus and find +EV
+        from difflib import SequenceMatcher
+        matched = 0
+        fed_matched = 0
+        min_edge = 3.0  # Higher threshold than sports (fewer sources, less confidence)
+
+        for km in econ_mkts:
+            k_title = km.get('title', '')
+            k_topic = _topic_tag(k_title)
+            if not k_topic:
+                continue
+
+            yb = km.get('yes_bid', 0) or 0
+            ya = km.get('yes_ask', 0) or 0
+            k_mid = ((yb + ya) / 2 if yb > 0 and ya > 0 else yb or ya) / 100.0
+
+            if k_mid <= 0.03 or k_mid >= 0.97:
+                continue
+
+            # --- Build consensus fair probability ---
+            # Sources with weights (same approach as sports: weighted average)
+            sources = []  # list of (prob, weight, name)
+
+            # A) CME FedWatch — only for Fed rate markets, 3x weight
+            if fedwatch and _is_fed_rate_market(k_title):
+                t = k_title.lower()
+                # Match Kalshi market to FedWatch probability
+                # "Will Fed cut rates?" → use cut probability
+                # "Will Fed hold rates?" → use hold probability
+                # "Rate cut in [month]?" → use cut probability
+                fw_prob = None
+                if any(w in t for w in ['cut', 'lower', 'reduce', 'ease', 'decrease']):
+                    fw_prob = fedwatch['cut_25'] + fedwatch.get('cut_50', 0)
+                elif any(w in t for w in ['hold', 'unchanged', 'steady', 'maintain', 'no change', 'pause']):
+                    fw_prob = fedwatch['hold']
+                elif any(w in t for w in ['hike', 'raise', 'increase', 'tighten']):
+                    fw_prob = fedwatch.get('hike', 0)
+                # For generic "rate decision" markets, try to infer from title
+                elif 'rate' in t and not any(w in t for w in ['cut', 'hold', 'hike']):
+                    # Check if it's asking about number of cuts
+                    nums = re.findall(r'(\d+)\s*(?:cut|rate)', t)
+                    if nums:
+                        fw_prob = fedwatch['cut_25']
+
+                if fw_prob is not None and 0.01 < fw_prob < 0.99:
+                    sources.append((fw_prob, 3, 'FedWatch'))
+
+            # B) Polymarket — fuzzy match, 2x weight for Fed, 1x for others
+            k_month = _extract_month(k_title)
+            k_keywords = _econ_keywords(k_title)
+            best_poly_score = 0
+            best_poly = None
+
+            for pm in poly_mkts:
+                if pm['topic'] != k_topic:
+                    continue
+                if k_month and pm['month'] and k_month != pm['month']:
+                    continue
+                if k_keywords and pm['keywords']:
+                    overlap = len(k_keywords & pm['keywords'])
+                    keyword_score = overlap / max(min(len(k_keywords), len(pm['keywords'])), 1)
+                else:
+                    keyword_score = 0
+                fuzzy = SequenceMatcher(None, k_title.lower(), pm['title'].lower()).ratio()
+                score = keyword_score * 0.5 + fuzzy * 0.5
+                if score > best_poly_score:
+                    best_poly_score = score
+                    best_poly = pm
+
+            if best_poly_score >= 0.35 and best_poly:
+                poly_weight = 2 if k_topic == 'fed' else 1
+                sources.append((best_poly['yes_price'], poly_weight, 'Polymarket'))
+
+            # Need at least 1 consensus source
+            if not sources:
+                continue
+
+            # C) Weighted consensus (same as sports devig approach)
+            total_weight = sum(w for _, w, _ in sources)
+            fair_prob = sum(p * w for p, w, _ in sources) / total_weight
+
+            # Edge: fair value vs Kalshi mid
+            # Positive edge = Kalshi is underpriced (buy YES)
+            # Negative edge = Kalshi is overpriced (buy NO)
+            edge_yes = (fair_prob - k_mid) * 100  # Edge on YES side
+            edge_no = (k_mid - fair_prob) * 100   # Edge on NO side (= overpriced YES)
+
+            actionable_edge = max(edge_yes, edge_no)
+
+            if actionable_edge < min_edge:
+                continue
+
+            matched += 1
+            if k_topic == 'fed':
+                fed_matched += 1
+
+            # Determine bet direction
+            if edge_yes > edge_no:
+                bet_action = 'BUY YES'
+                edge = round(edge_yes, 1)
+                bet_odds = round(implied_to_american(k_mid))
+            else:
+                bet_action = 'BUY NO'
+                edge = round(edge_no, 1)
+                no_implied = 1.0 - k_mid
+                bet_odds = round(implied_to_american(no_implied))
+
+            # Build consensus description
+            source_desc = ' + '.join(f'{n}({w}x)' for _, w, n in sources)
+
+            opportunities.append({
+                'player': k_title[:60],
+                'game': f"Fair: {fair_prob*100:.0f}% [{source_desc}] | {k_topic.upper()}",
+                'commence': '',
+                'market': 'Economic',
+                'book': 'Kalshi',
+                'type': 'economic',
+                'edge': edge,
+                'gross_edge': edge,
+                'recommendation': f"{bet_action} on Kalshi (consensus {fair_prob*100:.0f}% vs Kalshi {k_mid*100:.0f}%)",
+                'odds': bet_odds,
+                'label1_name': 'Kalshi',
+                'label1_value': f"{k_mid*100:.0f}¢ ({format_american(round(implied_to_american(k_mid)))})",
+                'label2_name': 'Consensus Fair',
+                'label2_value': f"{fair_prob*100:.0f}¢ [{source_desc}]",
+                'label3_name': 'Edge',
+                'label3_value': f"+{edge:.1f}% {bet_action}",
+                'target_prob': round(k_mid * 100, 1),
+                'fair_prob': round(fair_prob * 100, 1),
+                'juice_display': f'{len(sources)} source{"s" if len(sources) > 1 else ""}: {source_desc}',
+                'consensus_books': len(sources),
+                'kelly_fraction': round(quarter_kelly(fair_prob, bet_odds) * 100, 2) if bet_odds != 0 else 0,
+            })
+
+        log_debug(f"  Econ consensus: {matched} +EV ({fed_matched} Fed w/ FedWatch), {len(opportunities)} above {min_edge}% threshold")
 
     except Exception as e:
         log_debug(f"  Economic error: {e}")
@@ -1956,8 +2221,7 @@ def scan_markets():
                 all_opps.extend(arbs)
         time.sleep(0.3)
 
-    # Cross-exchange scanner skipped — hits Kalshi /markets again (rate limited)
-    # Weather and econ already ran at top of scan with fresh rate limit budget
+    # Cross-exchange comparison now handled inside fetch_econ_opps (Kalshi vs Polymarket)
 
     # Sort: arbs first, then by edge descending
     type_priority = {'arbitrage': 0, 'cross_exchange': 1, 'weather': 2, 'economic': 3}
@@ -1969,11 +2233,11 @@ def scan_markets():
 
     active = len(API_KEYS) - len(_dead_keys)
     arb_count = len([o for o in all_opps if o['type'] == 'arbitrage'])
-    cross_count = len([o for o in all_opps if o['type'] == 'cross_exchange'])
+    cross_count = 0  # Merged into econ scanner
     weather_count = len([o for o in all_opps if o['type'] == 'weather'])
     econ_count = len([o for o in all_opps if o['type'] == 'economic'])
-    sports_count = len(all_opps) - arb_count - cross_count - weather_count - econ_count
-    log_debug(f"=== DONE: {sports_count} sports +EV, {arb_count} arb, {cross_count} cross-exchange, {weather_count} weather, {econ_count} econ ({active}/{len(API_KEYS)} keys active) ===")
+    sports_count = len(all_opps) - arb_count - weather_count - econ_count
+    log_debug(f"=== DONE: {sports_count} sports +EV, {arb_count} arb, {weather_count} weather, {econ_count} econ ({active}/{len(API_KEYS)} keys active) ===")
 
 
 # ============================================================
