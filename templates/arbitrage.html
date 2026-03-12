@@ -212,7 +212,7 @@
 
     <div class="header">
         <h1>🎯 +EV Finder</h1>
-        <div class="sub">Sports · Kalshi vs Polymarket · Weather · Economic | Manual scan only</div>
+        <div class="sub">NBA · NCAAB · NHL Props + Moneylines | Manual scan only</div>
     </div>
 
     <div class="stats">
@@ -223,18 +223,6 @@
         <div class="stat-card">
             <div class="stat-value" id="totalArbs" style="color:#ffd700">0</div>
             <div class="stat-label">Arb</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-value" id="totalCross" style="color:#e040fb">0</div>
-            <div class="stat-label">K vs P</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-value" id="totalWeather" style="color:#00bcd4">0</div>
-            <div class="stat-label">Weather</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-value" id="totalEcon" style="color:#ff9800">0</div>
-            <div class="stat-label">Econ</div>
         </div>
     </div>
 
@@ -266,8 +254,6 @@
         <button class="filter-btn active" onclick="setFilter('all', this)">All</button>
         <button class="filter-btn" onclick="setFilter('sports', this)">🏀 Sports</button>
         <button class="filter-btn" onclick="setFilter('arbitrage', this)">⚡ Arb</button>
-        <button class="filter-btn" onclick="setFilter('weather', this)">🌡️ Weather</button>
-        <button class="filter-btn" onclick="setFilter('economic', this)">📊 Econ</button>
         <button class="filter-btn" onclick="setFilter('strong', this)">Strong 4%+</button>
     </div>
 
@@ -410,15 +396,9 @@
                             allOpps = data.opportunities || [];
 
                             const arbCount = allOpps.filter(o => o.type === 'arbitrage').length;
-                            const crossCount = allOpps.filter(o => o.type === 'cross_exchange').length;
-                            const weatherCount = allOpps.filter(o => o.type === 'weather').length;
-                            const econCount = allOpps.filter(o => o.type === 'economic').length;
-                            const sportsCount = allOpps.length - arbCount - crossCount - weatherCount - econCount;
+                            const sportsCount = allOpps.length - arbCount;
                             document.getElementById('totalSports').textContent = sportsCount;
                             document.getElementById('totalArbs').textContent = arbCount;
-                            document.getElementById('totalCross').textContent = crossCount;
-                            document.getElementById('totalWeather').textContent = weatherCount;
-                            document.getElementById('totalEcon').textContent = econCount;
                             document.getElementById('statusText').textContent =
                                 `Last scan: ${data.last_scan} · ${allOpps.length} +EV bets found`;
                             document.getElementById('filters').style.display =
@@ -445,12 +425,6 @@
                 opps = allOpps.filter(o => o.type === 'arbitrage');
             else if (currentFilter === 'sports')
                 opps = allOpps.filter(o => ['player_prop', 'game_market'].includes(o.type));
-            else if (currentFilter === 'cross_exchange')
-                opps = allOpps.filter(o => o.type === 'cross_exchange');
-            else if (currentFilter === 'weather')
-                opps = allOpps.filter(o => o.type === 'weather');
-            else if (currentFilter === 'economic')
-                opps = allOpps.filter(o => o.type === 'economic');
             else if (currentFilter === 'strong')
                 opps = allOpps.filter(o => o.edge >= 4);
 
@@ -468,13 +442,9 @@
 
             container.innerHTML = opps.map(opp => {
                 const isArb = opp.type === 'arbitrage';
-                const isCross = opp.type === 'cross_exchange';
-                const isWeather = opp.type === 'weather';
-                const isEcon = opp.type === 'economic';
-                const isNonSports = isCross || isWeather || isEcon;
-                const cls = isArb ? 'arb' : isCross ? 'cross' : isWeather ? 'weather' : isEcon ? 'econ' : (opp.edge >= 6 ? 'elite' : opp.edge >= 4 ? 'strong' : '');
-                const color = isArb ? '#ffd700' : isCross ? '#e040fb' : isWeather ? '#00bcd4' : isEcon ? '#ff9800' : (opp.edge >= 6 ? '#ff4757' : opp.edge >= 4 ? '#ffa502' : '#48bb78');
-                const typeIcon = isArb ? '💰' : isCross ? '🔄' : isWeather ? '🌡️' : isEcon ? '📊' : '⚡';
+                const cls = isArb ? 'arb' : (opp.edge >= 6 ? 'elite' : opp.edge >= 4 ? 'strong' : '');
+                const color = isArb ? '#ffd700' : (opp.edge >= 6 ? '#ff4757' : opp.edge >= 4 ? '#ffa502' : '#48bb78');
+                const typeIcon = isArb ? '💰' : '⚡';
                 const bookBadges = {
                     'FanDuel': 'badge-fd', 'DraftKings': 'badge-dk',
                     'BetMGM': 'badge-mgm', 'BetRivers': 'badge-br',
