@@ -137,6 +137,38 @@ def kalshi_get(url, params=None, timeout=15):
     """Make authenticated GET request to Kalshi."""
     return requests.get(url, params=params, headers=kalshi_headers(), timeout=timeout)
 
+def kalshi_prices(m):
+    """Extract yes_bid and yes_ask from a Kalshi market dict, in cents (int).
+    Handles both old format (yes_bid: 50) and new format (yes_bid_dollars: '0.5000')."""
+    yb = m.get('yes_bid', 0) or 0
+    ya = m.get('yes_ask', 0) or 0
+    lp = m.get('last_price', 0) or 0
+
+    # If integer fields are missing/zero, try dollar string fields
+    if yb == 0:
+        yb_str = m.get('yes_bid_dollars', '') or ''
+        if yb_str:
+            try:
+                yb = round(float(yb_str) * 100)
+            except (ValueError, TypeError):
+                pass
+    if ya == 0:
+        ya_str = m.get('yes_ask_dollars', '') or ''
+        if ya_str:
+            try:
+                ya = round(float(ya_str) * 100)
+            except (ValueError, TypeError):
+                pass
+    if lp == 0:
+        lp_str = m.get('last_price_dollars', '') or ''
+        if lp_str:
+            try:
+                lp = round(float(lp_str) * 100)
+            except (ValueError, TypeError):
+                pass
+
+    return int(yb), int(ya), int(lp)
+
 def normalize_player_name(name):
     """Normalize for matching: lowercase, strip suffixes."""
     name = ' '.join(name.strip().split()).lower()
@@ -1580,18 +1612,13 @@ def fetch_weather_opps():
     opportunities = []
 
     try:
-        # Real Kalshi weather series tickers — top cities only to stay under rate limit
+        # Top 5 cities — keep small to leave Kalshi rate limit budget for econ
         WEATHER_SERIES = {
             'KXHIGHNY':      {'city': 'NYC',       'lat': 40.78, 'lon': -73.97},
             'KXHIGHCHI':     {'city': 'Chicago',   'lat': 41.88, 'lon': -87.63},
             'KXHIGHMIA':     {'city': 'Miami',     'lat': 25.76, 'lon': -80.19},
             'KXHIGHLAX':     {'city': 'LA',        'lat': 34.05, 'lon': -118.24},
-            'KXHIGHAUS':     {'city': 'Austin',    'lat': 30.27, 'lon': -97.74},
             'KXHIGHDEN':     {'city': 'Denver',    'lat': 39.74, 'lon': -104.98},
-            'KXHIGHTDC':     {'city': 'DC',        'lat': 38.90, 'lon': -77.04},
-            'KXHIGHTBOS':    {'city': 'Boston',    'lat': 42.36, 'lon': -71.06},
-            'KXHIGHTSEA':    {'city': 'Seattle',   'lat': 47.61, 'lon': -122.33},
-            'KXHIGHTATL':    {'city': 'Atlanta',   'lat': 33.75, 'lon': -84.39},
         }
 
         weather_mkts = []
@@ -1614,18 +1641,12 @@ def fetch_weather_opps():
                         log_debug(f"    DEBUG price fields: {price_fields}")
                     count = 0
                     for m in mkts:
-                        # Accept any price indicator: bid/ask, yes_price, last_price
-                        yb = m.get('yes_bid', 0) or 0
-                        ya = m.get('yes_ask', 0) or 0
-                        yp = m.get('yes_price', 0) or 0
-                        lp = m.get('last_price', 0) or 0
-                        vol = m.get('volume', 0) or 0
-                        has_price = yb > 0 or ya > 0 or yp > 0 or lp > 0
+                        yb, ya, lp = kalshi_prices(m)
+                        has_price = yb > 0 or ya > 0 or lp > 0
                         if has_price:
-                            # Normalize: use bid/ask if available, fall back to yes_price
-                            if yb == 0 and ya == 0 and yp > 0:
-                                m['yes_bid'] = yp
-                                m['yes_ask'] = yp
+                            # Normalize into dict for downstream code
+                            m['yes_bid'] = yb if yb > 0 else (lp if lp > 0 else 0)
+                            m['yes_ask'] = ya if ya > 0 else (lp if lp > 0 else 0)
                             m['_city_info'] = info
                             m['_series'] = series_ticker
                             weather_mkts.append(m)
@@ -1645,14 +1666,11 @@ def fetch_weather_opps():
                         mkts = resp.json().get('markets', [])
                         count = 0
                         for m in mkts:
-                            yb = m.get('yes_bid', 0) or 0
-                            ya = m.get('yes_ask', 0) or 0
-                            yp = m.get('yes_price', 0) or 0
-                            has_price = yb > 0 or ya > 0 or yp > 0
+                            yb, ya, lp = kalshi_prices(m)
+                            has_price = yb > 0 or ya > 0 or lp > 0
                             if has_price:
-                                if yb == 0 and ya == 0 and yp > 0:
-                                    m['yes_bid'] = yp
-                                    m['yes_ask'] = yp
+                                m['yes_bid'] = yb if yb > 0 else lp
+                                m['yes_ask'] = ya if ya > 0 else lp
                                 m['_city_info'] = info
                                 m['_series'] = series_ticker
                                 weather_mkts.append(m)
@@ -1953,13 +1971,10 @@ def fetch_econ_opps():
                     mkts = resp.json().get('markets', [])
                     count = 0
                     for m in mkts:
-                        yb = m.get('yes_bid', 0) or 0
-                        ya = m.get('yes_ask', 0) or 0
-                        yp = m.get('yes_price', 0) or m.get('last_price', 0) or 0
-                        if yb > 0 or ya > 0 or yp > 0:
-                            if yb == 0 and ya == 0 and yp > 0:
-                                m['yes_bid'] = yp
-                                m['yes_ask'] = yp
+                        yb, ya, lp = kalshi_prices(m)
+                        if yb > 0 or ya > 0 or lp > 0:
+                            m['yes_bid'] = yb if yb > 0 else lp
+                            m['yes_ask'] = ya if ya > 0 else lp
                             econ_mkts.append(m)
                             count += 1
                     if count > 0:
@@ -1974,9 +1989,10 @@ def fetch_econ_opps():
                         mkts = resp.json().get('markets', [])
                         count = 0
                         for m in mkts:
-                            yb = m.get('yes_bid', 0) or 0
-                            ya = m.get('yes_ask', 0) or 0
-                            if yb > 0 or ya > 0:
+                            yb, ya, lp = kalshi_prices(m)
+                            if yb > 0 or ya > 0 or lp > 0:
+                                m['yes_bid'] = yb if yb > 0 else lp
+                                m['yes_ask'] = ya if ya > 0 else lp
                                 econ_mkts.append(m)
                                 count += 1
                         if count > 0:
@@ -2060,6 +2076,11 @@ def fetch_econ_opps():
 
             yb = km.get('yes_bid', 0) or 0
             ya = km.get('yes_ask', 0) or 0
+            # Fallback to kalshi_prices if not normalized yet
+            if yb == 0 and ya == 0:
+                yb, ya, lp = kalshi_prices(km)
+                if yb == 0 and ya == 0 and lp > 0:
+                    yb = ya = lp
             k_mid = ((yb + ya) / 2 if yb > 0 and ya > 0 else yb or ya) / 100.0
 
             # Debug: log first 3 Fed market prices
