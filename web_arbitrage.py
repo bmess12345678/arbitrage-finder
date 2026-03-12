@@ -2232,37 +2232,16 @@ def scan_markets():
     log_debug(f"Consensus: + {', '.join(BOOK_DISPLAY.get(b, b) for b in CONSENSUS_ONLY)} + Kalshi + Polymarket")
     log_debug(f"Strategy: CO book vs weighted consensus (Pinnacle/Kalshi/Poly 3x) | Min edge: {MIN_EDGE_NET}%")
 
-    # ---- KALSHI MARKETS (weather + econ first, before rate limit exhausted) ----
-    # Weather and econ use targeted series queries = high value per API call
-    kalshi_auth = "authenticated" if KALSHI_API_KEY else "unauthenticated (set KALSHI_API_KEY env var)"
-    log_debug(f"  Kalshi API: {kalshi_auth}")
-
-    log_debug("--- Weather Markets (Kalshi) ---")
-    try:
-        weather_opps = fetch_weather_opps()
-        all_opps.extend(weather_opps)
-    except Exception as e:
-        log_debug(f"  Weather error: {e}")
-
-    log_debug("--- Economic Markets (Kalshi) ---")
-    try:
-        econ_opps = fetch_econ_opps()
-        all_opps.extend(econ_opps)
-    except Exception as e:
-        log_debug(f"  Economic error: {e}")
-
     # ---- POLYMARKET (separate API, no Kalshi rate limit) ----
     log_debug("--- Polymarket ---")
     poly_sports = fetch_polymarket_sports(log_fn=log_debug)
     poly_props = poly_sports.get('props', {})
     poly_games = poly_sports.get('games', {})
 
-    # Kalshi props/games: skip general scan (only returns combos)
-    # If Kalshi ever offers non-combo individual props, revisit fetch_kalshi_sports
     kalshi_props = {}
     kalshi_games = {}
 
-    log_debug(f"  Exchange consensus: Kalshi {len(kalshi_games)} games, Polymarket {len(poly_games)} games")
+    log_debug(f"  Exchange consensus: Polymarket {len(poly_games)} games")
 
     # ---- SPORTS (Odds API) ----
     # 1. Player props (event-level) — +EV and arbs
@@ -2292,11 +2271,8 @@ def scan_markets():
                 all_opps.extend(arbs)
         time.sleep(0.3)
 
-    # Cross-exchange comparison now handled inside fetch_econ_opps (Kalshi vs Polymarket)
-
     # Sort: arbs first, then by edge descending
-    type_priority = {'arbitrage': 0, 'cross_exchange': 1, 'weather': 2, 'economic': 3}
-    all_opps.sort(key=lambda x: (type_priority.get(x['type'], 4) if x['type'] != 'arbitrage' else 0, -x['edge']))
+    all_opps.sort(key=lambda x: (0 if x['type'] == 'arbitrage' else 1, -x['edge']))
 
     state['opportunities'] = all_opps
     state['last_scan'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -2304,11 +2280,8 @@ def scan_markets():
 
     active = len(API_KEYS) - len(_dead_keys)
     arb_count = len([o for o in all_opps if o['type'] == 'arbitrage'])
-    cross_count = 0  # Merged into econ scanner
-    weather_count = len([o for o in all_opps if o['type'] == 'weather'])
-    econ_count = len([o for o in all_opps if o['type'] == 'economic'])
-    sports_count = len(all_opps) - arb_count - weather_count - econ_count
-    log_debug(f"=== DONE: {sports_count} sports +EV, {arb_count} arb, {weather_count} weather, {econ_count} econ ({active}/{len(API_KEYS)} keys active) ===")
+    sports_count = len(all_opps) - arb_count
+    log_debug(f"=== DONE: {sports_count} sports +EV, {arb_count} arb ({active}/{len(API_KEYS)} keys active) ===")
 
 
 # ============================================================
