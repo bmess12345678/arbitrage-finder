@@ -2333,6 +2333,216 @@ def key_status():
             results.append({'key': f'...{key[-6:]}', 'status': 'error'})
     return jsonify({'keys': results})
 
+# ============================================================
+# ODDS SEARCH — Find best odds across all books for a bet
+# ============================================================
+
+_events_cache = {}  # {sport: {'data': [...], 'ts': timestamp}}
+
+def _get_cached_events(sport):
+    """Get events with 5-minute cache to save API calls."""
+    now = time.time()
+    if sport in _events_cache and now - _events_cache[sport]['ts'] < 300:
+        return _events_cache[sport]['data']
+    events = fetch_events(sport)
+    if events:
+        _events_cache[sport] = {'data': events, 'ts': now}
+    return events
+
+@app.route('/api/search')
+def search_odds():
+    """Search for a player or team and return all books' odds.
+    Params: q (name), type (props|moneyline, default both), sport (nba|ncaab|nhl, default all)
+    Costs 1 API call per sport+market checked."""
+    query = request.args.get('q', '').strip()
+    search_type = request.args.get('type', 'all')  # props, moneyline, all
+    sport_filter = request.args.get('sport', 'all')  # nba, ncaab, nhl, all
+
+    if not query or len(query) < 2:
+        return jsonify({'error': 'Query too short', 'results': []})
+
+    q_lower = query.lower()
+    results = []
+
+    # Determine which sports to search
+    sport_map = {
+        'nba': 'basketball_nba',
+        'ncaab': 'basketball_ncaab',
+        'nhl': 'icehockey_nhl',
+    }
+    if sport_filter != 'all' and sport_filter in sport_map:
+        sports = [(sport_filter, sport_map[sport_filter])]
+    else:
+        sports = list(sport_map.items())
+
+    prop_markets = {
+        'basketball_nba': [('player_points', 'Points'), ('player_rebounds', 'Rebounds')],
+        'basketball_ncaab': [('player_points', 'Points'), ('player_rebounds', 'Rebounds')],
+        'icehockey_nhl': [('player_points', 'Points'), ('player_shots_on_goal', 'Shots on Goal')],
+    }
+
+    for sport_key, sport_api in sports:
+        # --- MONEYLINE search ---
+        if search_type in ('moneyline', 'all'):
+            events = _get_cached_events(sport_api)
+            # Check if query matches any team name
+            matching_events = []
+            for ev in events:
+                home = ev.get('home_team', '')
+                away = ev.get('away_team', '')
+                if q_lower in home.lower() or q_lower in away.lower():
+                    matching_events.append(ev)
+
+            if matching_events:
+                games = fetch_odds(sport_api, 'h2h')
+                if games:
+                    for game in games:
+                        home = game.get('home_team', '')
+                        away = game.get('away_team', '')
+                        if q_lower not in home.lower() and q_lower not in away.lower():
+                            continue
+                        # Extract all books' moneyline odds for the matched team
+                        matched_team = home if q_lower in home.lower() else away
+                        other_team = away if matched_team == home else home
+                        commence = game.get('commence_time', '')
+
+                        book_odds = []
+                        for bk in game.get('bookmakers', []):
+                            bk_name = bk.get('title', bk.get('key', ''))
+                            bk_key = bk.get('key', '')
+                            for mkt in bk.get('markets', []):
+                                if mkt['key'] != 'h2h':
+                                    continue
+                                for outcome in mkt.get('outcomes', []):
+                                    if outcome['name'] == matched_team:
+                                        odds = outcome.get('price', 0)
+                                        is_bettable = bk_key in CO_BETTABLE
+                                        book_odds.append({
+                                            'book': bk_name,
+                                            'book_key': bk_key,
+                                            'odds': odds,
+                                            'bettable': is_bettable,
+                                        })
+
+                        if book_odds:
+                            # Best American odds = highest value (+200 > +150 > -110 > -150)
+                            book_odds.sort(key=lambda x: x['odds'], reverse=True)
+                            results.append({
+                                'type': 'moneyline',
+                                'player': matched_team,
+                                'game': f"{away} @ {home}",
+                                'sport': sport_key.upper(),
+                                'market': 'Moneyline',
+                                'line': None,
+                                'commence': commence,
+                                'books': book_odds,
+                                'best_bettable': next((b for b in book_odds if b['bettable']), None),
+                            })
+
+        # --- PROPS search ---
+        if search_type in ('props', 'all'):
+            events = _get_cached_events(sport_api)
+            # For props, limit events to avoid burning API calls
+            # Each event × each market type = 1 API call
+            prop_events_checked = 0
+            player_found_in_sport = False
+            for ev in events[:8]:  # Check at most 8 events
+                eid = ev.get('id')
+                home = ev.get('home_team', '')
+                away = ev.get('away_team', '')
+
+                for prop_api_key, prop_name in prop_markets.get(sport_api, []):
+                    edata = fetch_event_odds(sport_api, eid, prop_api_key)
+                    if not edata or not edata.get('bookmakers'):
+                        continue
+
+                    # Search all bookmakers for the player name
+                    player_found = False
+                    for bk in edata.get('bookmakers', []):
+                        for mkt in bk.get('markets', []):
+                            for outcome in mkt.get('outcomes', []):
+                                name = outcome.get('description', '') or outcome.get('name', '')
+                                if q_lower in name.lower():
+                                    player_found = True
+                                    break
+                            if player_found:
+                                break
+                        if player_found:
+                            break
+
+                    if not player_found:
+                        continue
+
+                    # Found the player — now collect all books' odds
+                    # Group by line value
+                    lines = {}  # {line_val: {player, over_odds: [{book, odds}], under_odds: [...]}}
+                    for bk in edata.get('bookmakers', []):
+                        bk_name = bk.get('title', bk.get('key', ''))
+                        bk_key = bk.get('key', '')
+                        is_bettable = bk_key in CO_BETTABLE
+                        for mkt in bk.get('markets', []):
+                            for outcome in mkt.get('outcomes', []):
+                                name = outcome.get('description', '') or outcome.get('name', '')
+                                if q_lower not in name.lower():
+                                    continue
+                                side = outcome.get('name', '').lower()  # "Over" or "Under"
+                                line_val = outcome.get('point', 0)
+                                odds = outcome.get('price', 0)
+
+                                key = f"{name}_{line_val}"
+                                if key not in lines:
+                                    lines[key] = {
+                                        'player': name,
+                                        'line': line_val,
+                                        'over': [],
+                                        'under': [],
+                                    }
+                                entry = {
+                                    'book': bk_name,
+                                    'book_key': bk_key,
+                                    'odds': odds,
+                                    'bettable': is_bettable,
+                                }
+                                if 'over' in side:
+                                    lines[key]['over'].append(entry)
+                                elif 'under' in side:
+                                    lines[key]['under'].append(entry)
+
+                    # Build results from lines
+                    for key, line_data in lines.items():
+                        # Sort each side by best odds
+                        for side in ['over', 'under']:
+                            line_data[side].sort(key=lambda x: x['odds'], reverse=True)
+
+                        if line_data['over'] or line_data['under']:
+                            results.append({
+                                'type': 'prop',
+                                'player': line_data['player'],
+                                'game': f"{away} @ {home}",
+                                'sport': sport_key.upper(),
+                                'market': prop_name,
+                                'line': line_data['line'],
+                                'commence': ev.get('commence_time', ''),
+                                'over': line_data['over'],
+                                'under': line_data['under'],
+                                'best_over_bettable': next((b for b in line_data['over'] if b['bettable']), None),
+                                'best_under_bettable': next((b for b in line_data['under'] if b['bettable']), None),
+                            })
+
+                    # Found player in this event — no need to check other events for this prop
+                    break
+
+                # If we found results for this player, stop checking more events
+                if any(r.get('player', '').lower().startswith(q_lower[:4]) for r in results if r['type'] == 'prop'):
+                    break
+
+    return jsonify({
+        'query': query,
+        'results': results,
+        'count': len(results),
+    })
+
+
 @app.route('/api/kalshi-debug')
 def kalshi_debug():
     """Diagnostic: discover what Kalshi actually has available."""
