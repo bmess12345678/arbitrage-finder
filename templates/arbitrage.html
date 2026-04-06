@@ -243,6 +243,29 @@
         </div>
     </div>
 
+    <!-- ODDS SEARCH -->
+    <div style="margin:15px auto; max-width:700px; padding:0 15px;">
+        <div style="background:#16213e; border:1px solid #333; border-radius:10px; padding:15px;">
+            <div style="font-size:0.85em; color:#999; margin-bottom:8px;">🔎 Find Best Odds</div>
+            <div style="display:flex; gap:8px;">
+                <input type="text" id="searchQuery" placeholder="Player or team name..."
+                    onkeydown="if(event.key==='Enter')searchOdds()"
+                    style="flex:1; background:#0a0e27; border:1px solid #444; border-radius:6px;
+                           color:#fff; padding:10px 14px; font-size:1em; font-family:inherit;">
+                <select id="searchType" style="background:#0a0e27; border:1px solid #444; border-radius:6px;
+                           color:#fff; padding:8px; font-size:0.85em;">
+                    <option value="all">All</option>
+                    <option value="props">Props</option>
+                    <option value="moneyline">ML</option>
+                </select>
+                <button onclick="searchOdds()" style="background:#4834d4; color:#fff; border:none;
+                    border-radius:6px; padding:10px 18px; cursor:pointer; font-weight:bold; white-space:nowrap;">Search</button>
+            </div>
+            <div id="searchStatus" style="font-size:0.8em; color:#666; margin-top:6px;"></div>
+        </div>
+        <div id="searchResults" style="margin-top:10px;"></div>
+    </div>
+
     <div class="status" id="statusText">Ready — Click scan to find +EV opportunities</div>
 
     <div class="debug-toggle">
@@ -556,6 +579,120 @@
                         </div>
                     </div>`;
             }).join('');
+        }
+
+        // ---- ODDS SEARCH ----
+        async function searchOdds() {
+            const q = document.getElementById('searchQuery').value.trim();
+            const type = document.getElementById('searchType').value;
+            if (!q) return;
+
+            const key = document.getElementById('scanKey').value;
+            const status = document.getElementById('searchStatus');
+            const container = document.getElementById('searchResults');
+
+            status.textContent = `Searching "${q}"... (uses API calls)`;
+            status.style.color = '#ffa502';
+            container.innerHTML = '';
+
+            try {
+                const resp = await fetch(`/api/search?q=${encodeURIComponent(q)}&type=${type}`);
+                const data = await resp.json();
+
+                if (data.error) {
+                    status.textContent = data.error;
+                    status.style.color = '#ff4757';
+                    return;
+                }
+
+                if (!data.results || data.results.length === 0) {
+                    status.textContent = `No results for "${q}" — try a different name or check spelling`;
+                    status.style.color = '#999';
+                    return;
+                }
+
+                status.textContent = `${data.count} result${data.count !== 1 ? 's' : ''} for "${q}"`;
+                status.style.color = '#48bb78';
+
+                const bettableBadge = (bk) => {
+                    const badges = {
+                        'FanDuel': '🟦', 'DraftKings': '🟩', 'BetMGM': '🟨',
+                        'BetRivers': '🟪', 'theScore Bet': '🟫', 'Hard Rock': '🟥', 'Bally Bet': '🟧'
+                    };
+                    return badges[bk] || '⬜';
+                };
+
+                const fmtOdds = (odds) => odds > 0 ? `+${odds}` : `${odds}`;
+                const oddsColor = (bettable, isBest) =>
+                    isBest ? '#48bb78' : bettable ? '#fff' : '#666';
+
+                container.innerHTML = data.results.map(r => {
+                    if (r.type === 'moneyline') {
+                        const rows = r.books.map((b, i) => `
+                            <tr style="border-bottom:1px solid #1a1a3e;">
+                                <td style="padding:6px 10px; color:${oddsColor(b.bettable, i===0)};">
+                                    ${b.bettable ? '✅' : '⬜'} ${b.book}</td>
+                                <td style="padding:6px 10px; text-align:right; font-weight:bold;
+                                    color:${oddsColor(b.bettable, i===0)}; font-size:1.1em;">
+                                    ${fmtOdds(b.odds)}</td>
+                            </tr>`).join('');
+
+                        return `<div style="background:#16213e; border:1px solid #333; border-radius:10px;
+                                    margin-bottom:10px; overflow:hidden;">
+                            <div style="padding:12px 15px; border-bottom:1px solid #333; display:flex;
+                                        justify-content:space-between; align-items:center;">
+                                <div>
+                                    <strong style="color:#fff;">${r.player}</strong>
+                                    <span style="color:#999; font-size:0.85em;"> ML</span>
+                                </div>
+                                <span style="color:#666; font-size:0.8em;">${r.sport} · ${r.game}</span>
+                            </div>
+                            <table style="width:100%; border-collapse:collapse; font-size:0.9em;">${rows}</table>
+                        </div>`;
+
+                    } else if (r.type === 'prop') {
+                        const makeRows = (side, label) => {
+                            const entries = r[side] || [];
+                            if (!entries.length) return '';
+                            return entries.map((b, i) => `
+                                <tr style="border-bottom:1px solid #1a1a3e;">
+                                    <td style="padding:5px 10px; color:${oddsColor(b.bettable, i===0)};">
+                                        ${b.bettable ? '✅' : '⬜'} ${b.book}</td>
+                                    <td style="padding:5px 10px; text-align:center; color:#999; font-size:0.85em;">
+                                        ${label}</td>
+                                    <td style="padding:5px 10px; text-align:right; font-weight:bold;
+                                        color:${oddsColor(b.bettable, i===0)}; font-size:1.1em;">
+                                        ${fmtOdds(b.odds)}</td>
+                                </tr>`).join('');
+                        };
+
+                        const overRows = makeRows('over', `O ${r.line}`);
+                        const underRows = makeRows('under', `U ${r.line}`);
+
+                        return `<div style="background:#16213e; border:1px solid #333; border-radius:10px;
+                                    margin-bottom:10px; overflow:hidden;">
+                            <div style="padding:12px 15px; border-bottom:1px solid #333; display:flex;
+                                        justify-content:space-between; align-items:center;">
+                                <div>
+                                    <strong style="color:#fff;">${r.player}</strong>
+                                    <span style="color:#999; font-size:0.85em;"> ${r.market} ${r.line}</span>
+                                </div>
+                                <span style="color:#666; font-size:0.8em;">${r.sport} · ${r.game}</span>
+                            </div>
+                            <table style="width:100%; border-collapse:collapse; font-size:0.9em;">
+                                ${overRows}
+                                ${overRows && underRows ? '<tr><td colspan="3" style="border-bottom:2px solid #333;"></td></tr>' : ''}
+                                ${underRows}
+                            </table>
+                        </div>`;
+                    }
+                    return '';
+                }).join('');
+
+            } catch (err) {
+                status.textContent = `Error: ${err.message}`;
+                status.style.color = '#ff4757';
+            }
         }
 
     </script>
