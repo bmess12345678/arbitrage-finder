@@ -21,20 +21,30 @@
         .header h1 { font-size: 1.4em; }
         .header .sub { font-size: 0.8em; opacity: 0.8; margin-top: 4px; }
 
+        /* Top-level tabs */
+        .tabs { display: flex; background: #111528; border-bottom: 1px solid #222; }
+        .tab {
+            flex: 1; padding: 12px 8px; text-align: center; cursor: pointer;
+            font-size: 0.85em; color: #888; border-bottom: 2px solid transparent;
+        }
+        .tab.active { color: #fff; border-bottom-color: #667eea; background: #151a35; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
         .stats {
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 10px;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 6px;
             padding: 15px;
         }
         .stat-card {
             background: #16213e;
-            padding: 15px;
+            padding: 10px 4px;
             border-radius: 8px;
             text-align: center;
         }
-        .stat-value { font-size: 1.8em; font-weight: bold; color: #667eea; }
-        .stat-label { font-size: 0.7em; color: #999; margin-top: 5px; }
+        .stat-value { font-size: 1.4em; font-weight: bold; color: #667eea; }
+        .stat-label { font-size: 0.6em; color: #999; margin-top: 3px; }
 
         .controls { padding: 0 15px 15px; }
         .scan-btn {
@@ -47,7 +57,6 @@
             cursor: pointer;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
-            transition: all 0.3s;
         }
         .scan-btn:active { transform: scale(0.98); }
         .scan-btn:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -69,7 +78,6 @@
         }
         .debug-log.show { display: block; }
 
-        /* Filters */
         .filters {
             display: flex; gap: 8px; padding: 0 15px 12px; overflow-x: auto;
         }
@@ -80,7 +88,6 @@
         }
         .filter-btn.active { background: #667eea; border-color: #667eea; color: #fff; }
 
-        /* Cards */
         .opportunities { padding: 0 15px 30px; }
 
         .opp {
@@ -104,18 +111,10 @@
         .opp-player { font-size: 1.1em; font-weight: 700; color: #fff; }
         .opp-game { font-size: 0.8em; color: #8899aa; margin-top: 2px; }
 
-        .opp-edge-box {
-            text-align: right; flex-shrink: 0; margin-left: 12px;
-        }
-        .opp-edge {
-            font-size: 1.5em; font-weight: 800; line-height: 1;
-        }
-        .opp-edge-label {
-            font-size: 0.6em; font-weight: 400; color: #888; margin-top: 2px;
-        }
-        .opp-gross {
-            font-size: 0.75em; font-weight: 600; color: #667eea; margin-top: 4px;
-        }
+        .opp-edge-box { text-align: right; flex-shrink: 0; margin-left: 12px; }
+        .opp-edge { font-size: 1.5em; font-weight: 800; line-height: 1; }
+        .opp-edge-label { font-size: 0.6em; font-weight: 400; color: #888; margin-top: 2px; }
+        .opp-gross { font-size: 0.75em; font-weight: 600; color: #667eea; margin-top: 4px; }
 
         .badges { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
         .badge {
@@ -132,13 +131,15 @@
         .badge-bp { background: #005da6; color: #fff; }
         .badge-kalshi { background: #00d4aa; color: #1a1a1a; }
         .badge-poly { background: #7b61ff; color: #fff; }
+        .badge-book { background: #2d3748; color: #a0aec0; }
+        .badge-market { background: #2d3748; color: #a0aec0; }
+
         .consensus-tip { position: relative; cursor: help; }
         .consensus-tip .tip-content {
             display: none; position: fixed; z-index: 1000; min-width: 280px;
-            background: #1a2340; border: 1px solid #3a4a6a; border-radius: 8px; padding: 10px 14px;
-            font-size: 0.75em; white-space: nowrap;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
-            pointer-events: none;
+            background: #1a2340; border: 1px solid #3a4a6a; border-radius: 8px;
+            padding: 10px 14px; font-size: 0.75em; white-space: nowrap;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5); pointer-events: none;
         }
         .tip-row { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; border-bottom: 1px solid #1e2d50; }
         .tip-row:last-child { border-bottom: none; }
@@ -148,10 +149,6 @@
         .tip-wt { color: #666; font-size: 0.9em; }
         .tip-header { color: #556; font-size: 0.85em; padding-bottom: 4px; margin-bottom: 4px; border-bottom: 1px solid #2a3a5a; display: flex; justify-content: space-between; gap: 12px; }
 
-        .badge-book { background: #2d3748; color: #a0aec0; }
-        .badge-market { background: #2d3748; color: #a0aec0; }
-
-        /* Data grid */
         .opp-data {
             display: grid; grid-template-columns: repeat(3, 1fr);
             gap: 1px; background: #0d1530;
@@ -164,7 +161,6 @@
         }
         .data-value { font-size: 1.05em; font-weight: 700; color: #fff; }
 
-        /* Fair value bar (game markets) */
         .fair-bar { margin: 0 15px; padding: 0 0 4px; }
         .fair-bar-labels {
             font-size: 0.7em; color: #888; display: flex;
@@ -185,7 +181,6 @@
             font-size: 0.7em; color: #48bb78; text-align: center; margin-top: 4px;
         }
 
-        /* Recommendation */
         .opp-rec {
             padding: 10px 15px 12px;
             font-size: 0.9em; font-weight: 600; color: #48bb78;
@@ -194,112 +189,239 @@
             font-size: 0.8em; font-weight: 400; color: #8899aa; margin-top: 2px;
         }
 
+        /* Affiliate/action buttons */
+        .action-row {
+            display: flex; gap: 8px; padding: 0 15px 15px;
+        }
+        .action-btn {
+            flex: 1; display: inline-block; text-align: center;
+            padding: 10px 12px; border-radius: 8px; font-size: 0.85em; font-weight: 600;
+            text-decoration: none; color: #fff;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        .action-btn.secondary {
+            background: #2d3748; color: #e0e0e0;
+        }
+        .action-btn:active { opacity: 0.85; }
+
         .empty {
             text-align: center; padding: 60px 20px; color: #666;
         }
         .empty .icon { font-size: 3em; margin-bottom: 15px; }
 
-        /* Explainer */
         .explainer {
             margin: 0 15px 15px; padding: 12px 15px;
             background: #1a2744; border-radius: 8px;
             font-size: 0.75em; color: #8899aa; line-height: 1.5;
         }
         .explainer strong { color: #a0aec0; }
+
+        /* History tab */
+        .history-row {
+            background: #16213e; border-radius: 8px; padding: 10px 12px;
+            margin-bottom: 8px; font-size: 0.85em;
+        }
+        .history-meta { color: #888; font-size: 0.75em; }
+        .history-edge { float: right; font-weight: 700; color: #48bb78; }
+
+        /* Stats tab */
+        .stats-section {
+            background: #16213e; border-radius: 10px;
+            padding: 15px; margin: 10px 15px;
+        }
+        .stats-section h3 { font-size: 0.95em; color: #fff; margin-bottom: 10px; }
+        .stats-table { width: 100%; font-size: 0.85em; }
+        .stats-table th {
+            text-align: left; color: #888; font-weight: 500;
+            padding: 6px 4px; border-bottom: 1px solid #333;
+        }
+        .stats-table td {
+            padding: 6px 4px; border-bottom: 1px solid #1a2340;
+            color: #e0e0e0;
+        }
     </style>
 </head>
 <body>
 
     <div class="header">
         <h1>🎯 +EV Finder</h1>
-        <div class="sub">NBA · NCAAB · NHL Props + Moneylines | Manual scan only</div>
+        <div class="sub">Sports · Cross-Exchange · Weather · Economic</div>
     </div>
 
-    <div class="stats">
-        <div class="stat-card">
-            <div class="stat-value" id="totalSports">0</div>
-            <div class="stat-label">Sports</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-value" id="totalArbs" style="color:#ffd700">0</div>
-            <div class="stat-label">Arb</div>
-        </div>
+    <div class="tabs">
+        <div class="tab active" onclick="switchTab('scanner', this)">🔍 Scanner</div>
+        <div class="tab" onclick="switchTab('history', this)">📜 History</div>
+        <div class="tab" onclick="switchTab('stats', this)">📊 Stats</div>
     </div>
 
-    <div class="controls">
-        <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
-            <label style="font-size:0.8em; color:#999; white-space:nowrap;">🔑 Key:</label>
-            <input type="password" id="scanKey" placeholder="Enter scan key"
-                style="flex:1; background:#16213e; border:1px solid #333; border-radius:6px;
-                       color:#fff; padding:8px 12px; font-size:0.9em; font-family:inherit; max-width:200px;">
-        </div>
-        <button class="scan-btn" id="scanBtn" onclick="scan()">🔍 Scan All Markets</button>
-        <div style="display:flex; align-items:center; gap:10px; margin-top:10px;">
-            <label style="font-size:0.8em; color:#999; white-space:nowrap;">Bankroll: $</label>
-            <input type="number" id="bankrollInput" value="3000" min="100" step="100"
-                style="flex:1; background:#16213e; border:1px solid #333; border-radius:6px;
-                       color:#fff; padding:8px 12px; font-size:0.9em; font-family:inherit;">
-            <span style="font-size:0.7em; color:#666;">¼ Kelly sizing</span>
-        </div>
-    </div>
-
-    <!-- ODDS SEARCH -->
-    <div style="margin:15px auto; max-width:700px; padding:0 15px;">
-        <div style="background:#16213e; border:1px solid #333; border-radius:10px; padding:15px;">
-            <div style="font-size:0.85em; color:#999; margin-bottom:8px;">🔎 Find Best Odds</div>
-            <div style="display:flex; gap:8px;">
-                <input type="text" id="searchQuery" placeholder="Player or team name..."
-                    onkeydown="if(event.key==='Enter')searchOdds()"
-                    style="flex:1; background:#0a0e27; border:1px solid #444; border-radius:6px;
-                           color:#fff; padding:10px 14px; font-size:1em; font-family:inherit;">
-                <select id="searchType" style="background:#0a0e27; border:1px solid #444; border-radius:6px;
-                           color:#fff; padding:8px; font-size:0.85em;">
-                    <option value="all">All</option>
-                    <option value="props">Props</option>
-                    <option value="moneyline">ML</option>
-                </select>
-                <button onclick="searchOdds()" style="background:#4834d4; color:#fff; border:none;
-                    border-radius:6px; padding:10px 18px; cursor:pointer; font-weight:bold; white-space:nowrap;">Search</button>
+    <!-- ======================= SCANNER TAB ======================= -->
+    <div id="tab-scanner" class="tab-content active">
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-value" id="totalSports">0</div>
+                <div class="stat-label">Sports</div>
             </div>
-            <div id="searchStatus" style="font-size:0.8em; color:#666; margin-top:6px;"></div>
+            <div class="stat-card">
+                <div class="stat-value" id="totalArbs" style="color:#ffd700">0</div>
+                <div class="stat-label">Arb</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="totalCross" style="color:#e040fb">0</div>
+                <div class="stat-label">Cross</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="totalWeather" style="color:#00bcd4">0</div>
+                <div class="stat-label">Weather</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="totalEcon" style="color:#ff9800">0</div>
+                <div class="stat-label">Econ</div>
+            </div>
         </div>
-        <div id="searchResults" style="margin-top:10px;"></div>
-    </div>
 
-    <div class="status" id="statusText">Ready — Click scan to find +EV opportunities</div>
+        <div class="controls">
+            <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
+                <label style="font-size:0.8em; color:#999; white-space:nowrap;">🔑 Key:</label>
+                <input type="password" id="scanKey" placeholder="Enter scan key"
+                    style="flex:1; background:#16213e; border:1px solid #333; border-radius:6px;
+                           color:#fff; padding:8px 12px; font-size:0.9em; font-family:inherit; max-width:200px;">
+            </div>
+            <button class="scan-btn" id="scanBtn" onclick="scan()">🔍 Scan All Markets</button>
+            <div style="display:flex; align-items:center; gap:10px; margin-top:10px;">
+                <label style="font-size:0.8em; color:#999; white-space:nowrap;">Bankroll: $</label>
+                <input type="number" id="bankrollInput" value="3000" min="100" step="100"
+                    style="flex:1; background:#16213e; border:1px solid #333; border-radius:6px;
+                           color:#fff; padding:8px 12px; font-size:0.9em; font-family:inherit;">
+                <span style="font-size:0.7em; color:#666;">¼ Kelly sizing</span>
+            </div>
+        </div>
 
-    <div class="debug-toggle">
-        <button onclick="toggleDebug()">📋 Debug Log</button>
-    </div>
-    <div class="debug-log" id="debugLog"></div>
+        <div style="margin:15px auto; max-width:700px; padding:0 15px;">
+            <div style="background:#16213e; border:1px solid #333; border-radius:10px; padding:15px;">
+                <div style="font-size:0.85em; color:#999; margin-bottom:8px;">🔎 Find Best Odds</div>
+                <div style="display:flex; gap:8px;">
+                    <input type="text" id="searchQuery" placeholder="Player or team name..."
+                        onkeydown="if(event.key==='Enter')searchOdds()"
+                        style="flex:1; background:#0a0e27; border:1px solid #444; border-radius:6px;
+                               color:#fff; padding:10px 14px; font-size:1em; font-family:inherit;">
+                    <select id="searchType" style="background:#0a0e27; border:1px solid #444; border-radius:6px;
+                               color:#fff; padding:8px; font-size:0.85em;">
+                        <option value="all">All</option>
+                        <option value="props">Props</option>
+                        <option value="moneyline">ML</option>
+                    </select>
+                    <button onclick="searchOdds()" style="background:#4834d4; color:#fff; border:none;
+                        border-radius:6px; padding:10px 18px; cursor:pointer; font-weight:bold; white-space:nowrap;">Search</button>
+                </div>
+                <div id="searchStatus" style="font-size:0.8em; color:#666; margin-top:6px;"></div>
+            </div>
+            <div id="searchResults" style="margin-top:10px;"></div>
+        </div>
 
-    <div class="filters" id="filters" style="display:none;">
-        <button class="filter-btn active" onclick="setFilter('all', this)">All</button>
-        <button class="filter-btn" onclick="setFilter('sports', this)">🏀 Sports</button>
-        <button class="filter-btn" onclick="setFilter('arbitrage', this)">⚡ Arb</button>
-        <button class="filter-btn" onclick="setFilter('strong', this)">Strong 4%+</button>
-    </div>
+        <div class="status" id="statusText">Ready — Click scan to find +EV opportunities</div>
 
-    <div class="opportunities" id="oppContainer">
-        <div class="empty">
-            <div class="icon">🔍</div>
-            <div>No opportunities yet</div>
-            <div style="margin-top:8px; font-size:0.9em;">Hit scan to search all markets</div>
+        <div class="debug-toggle">
+            <button onclick="toggleDebug()">📋 Debug Log</button>
+        </div>
+        <div class="debug-log" id="debugLog"></div>
+
+        <div class="filters" id="filters" style="display:none;">
+            <button class="filter-btn active" onclick="setFilter('all', this)">All</button>
+            <button class="filter-btn" onclick="setFilter('sports', this)">🏀 Sports</button>
+            <button class="filter-btn" onclick="setFilter('arbitrage', this)">💰 Arb</button>
+            <button class="filter-btn" onclick="setFilter('cross_exchange', this)">🔀 Cross-Exch</button>
+            <button class="filter-btn" onclick="setFilter('weather', this)">🌡️ Weather</button>
+            <button class="filter-btn" onclick="setFilter('economic', this)">📊 Econ</button>
+            <button class="filter-btn" onclick="setFilter('strong', this)">⭐ Strong 4%+</button>
+        </div>
+
+        <div class="opportunities" id="oppContainer">
+            <div class="empty">
+                <div class="icon">🔍</div>
+                <div>No opportunities yet</div>
+                <div style="margin-top:8px; font-size:0.9em;">Hit scan to search all markets</div>
+            </div>
+        </div>
+
+        <div class="explainer" id="explainer" style="display:none;">
+            <strong>How it works:</strong> CO-legal sportsbooks + sharp consensus books + Kalshi + Polymarket are all devigged
+            to find true fair odds. Each book is compared against a <strong>weighted leave-one-out consensus</strong>
+            with Pinnacle/Kalshi/Polymarket at 3× weight.
+            Weather uses a 3-model ensemble forecast (GFS + ECMWF + ICON) for proper uncertainty.
+            Economic uses CME FedWatch + Polymarket consensus vs Kalshi.
+            <strong>Every opportunity is logged</strong> to the History tab so you can track real performance over time.
         </div>
     </div>
 
-    <div class="explainer" id="explainer" style="display:none;">
-        <strong>How it works:</strong> All 7 CO books + 3 sharp consensus books + Kalshi exchange are devigged to find true fair odds.
-        Each CO book (and Kalshi) is compared against a <strong>weighted leave-one-out consensus</strong>, with
-        Pinnacle and Kalshi at 3x weight (sharpest signals — Pinnacle accepts unlimited sharp action, Kalshi is exchange-priced with no vig).
-        <strong>Gross</strong> = pricing disagreement before juice.
-        <strong>Net</strong> = your real edge after paying the vig. Any positive net = profitable long-term.
+    <!-- ======================= HISTORY TAB ======================= -->
+    <div id="tab-history" class="tab-content">
+        <div style="padding:15px;">
+            <div style="display:flex; gap:8px;">
+                <button class="scan-btn" style="flex:2;" onclick="loadHistory()">Load History</button>
+                <button class="scan-btn" style="flex:1; background:#2d3748;" onclick="runClvUpdate()" id="clvBtn">📈 Update CLV</button>
+            </div>
+            <div id="clvStatus" style="font-size:0.8em; color:#888; margin-top:6px; min-height:1em;"></div>
+            <a id="exportLink" href="#" onclick="return exportCsv()" style="display:inline-block; margin-top:10px;
+                color:#667eea; font-size:0.85em;">⬇️ Export all to CSV</a>
+            <div id="historyContent" style="margin-top:15px;"></div>
+        </div>
+    </div>
+
+    <!-- ======================= STATS TAB ======================= -->
+    <div id="tab-stats" class="tab-content">
+        <div style="padding:15px;">
+            <button class="scan-btn" onclick="loadStats()">Load Stats</button>
+            <div id="statsContent" style="margin-top:15px;"></div>
+        </div>
     </div>
 
     <script>
         let scanning = false;
         let allOpps = [];
         let currentFilter = 'all';
+
+        // Persist scan key in localStorage (so you don't re-enter it)
+        document.addEventListener('DOMContentLoaded', () => {
+            const saved = localStorage.getItem('scanKey');
+            if (saved) document.getElementById('scanKey').value = saved;
+            document.getElementById('scanKey').addEventListener('change', (e) => {
+                localStorage.setItem('scanKey', e.target.value);
+            });
+            const br = localStorage.getItem('bankroll');
+            if (br) document.getElementById('bankrollInput').value = br;
+            document.getElementById('bankrollInput').addEventListener('input', (e) => {
+                localStorage.setItem('bankroll', e.target.value);
+                renderOpps();
+            });
+
+            document.addEventListener('mouseover', (e) => {
+                const tip = e.target.closest('.consensus-tip');
+                if (!tip) return;
+                const content = tip.querySelector('.tip-content');
+                if (!content) return;
+                const rect = tip.getBoundingClientRect();
+                content.style.display = 'block';
+                content.style.left = Math.min(rect.left, window.innerWidth - 300) + 'px';
+                content.style.top = (rect.bottom + 8) + 'px';
+            });
+            document.addEventListener('mouseout', (e) => {
+                const tip = e.target.closest('.consensus-tip');
+                if (!tip) return;
+                const content = tip.querySelector('.tip-content');
+                if (content) content.style.display = 'none';
+            });
+        });
+
+        function switchTab(name, btn) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            btn.classList.add('active');
+            document.getElementById(`tab-${name}`).classList.add('active');
+        }
+
+        function getScanKey() {
+            return document.getElementById('scanKey').value;
+        }
 
         function getBankroll() {
             return parseFloat(document.getElementById('bankrollInput').value) || 3000;
@@ -349,29 +471,6 @@
             </div>`;
         }
 
-        // Re-render when bankroll changes
-        document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('bankrollInput').addEventListener('input', renderOpps);
-
-            // Tooltip positioning for consensus detail
-            document.addEventListener('mouseover', (e) => {
-                const tip = e.target.closest('.consensus-tip');
-                if (!tip) return;
-                const content = tip.querySelector('.tip-content');
-                if (!content) return;
-                const rect = tip.getBoundingClientRect();
-                content.style.display = 'block';
-                content.style.left = Math.min(rect.left, window.innerWidth - 300) + 'px';
-                content.style.top = (rect.bottom + 8) + 'px';
-            });
-            document.addEventListener('mouseout', (e) => {
-                const tip = e.target.closest('.consensus-tip');
-                if (!tip) return;
-                const content = tip.querySelector('.tip-content');
-                if (content) content.style.display = 'none';
-            });
-        });
-
         function toggleDebug() {
             document.getElementById('debugLog').classList.toggle('show');
         }
@@ -385,12 +484,12 @@
 
         async function scan() {
             if (scanning) return;
-            const key = document.getElementById('scanKey').value;
+            const key = getScanKey();
             scanning = true;
             const btn = document.getElementById('scanBtn');
             btn.disabled = true;
             btn.textContent = '⏳ Scanning...';
-            document.getElementById('statusText').textContent = 'Scanning & devigging lines... 30-90 sec';
+            document.getElementById('statusText').textContent = 'Scanning all markets... 60–120 sec';
 
             try {
                 const scanResp = await fetch(`/api/scan?key=${encodeURIComponent(key)}`, { method: 'POST' });
@@ -398,30 +497,24 @@
                     scanning = false;
                     btn.disabled = false;
                     btn.textContent = '🔍 Scan All Markets';
-                    document.getElementById('statusText').textContent = '🔒 Invalid key — enter the correct scan key above';
+                    document.getElementById('statusText').textContent = '🔒 Invalid key';
                     return;
                 }
                 const poll = setInterval(async () => {
                     try {
                         const resp = await fetch('/api/opportunities');
                         const data = await resp.json();
-
                         if (data.debug && data.debug.length > 0) {
                             document.getElementById('debugLog').innerHTML =
                                 data.debug.map(d => `<div>${d}</div>`).join('');
                         }
-
                         if (!data.scanning) {
                             clearInterval(poll);
                             scanning = false;
                             btn.disabled = false;
                             btn.textContent = '🔍 Scan All Markets';
                             allOpps = data.opportunities || [];
-
-                            const arbCount = allOpps.filter(o => o.type === 'arbitrage').length;
-                            const sportsCount = allOpps.length - arbCount;
-                            document.getElementById('totalSports').textContent = sportsCount;
-                            document.getElementById('totalArbs').textContent = arbCount;
+                            updateStats();
                             document.getElementById('statusText').textContent =
                                 `Last scan: ${data.last_scan} · ${allOpps.length} +EV bets found`;
                             document.getElementById('filters').style.display =
@@ -440,6 +533,21 @@
             }
         }
 
+        function updateStats() {
+            const counts = {
+                player_prop: 0, game_market: 0, arbitrage: 0,
+                cross_exchange: 0, weather: 0, economic: 0
+            };
+            for (const o of allOpps) {
+                counts[o.type] = (counts[o.type] || 0) + 1;
+            }
+            document.getElementById('totalSports').textContent = counts.player_prop + counts.game_market;
+            document.getElementById('totalArbs').textContent = counts.arbitrage;
+            document.getElementById('totalCross').textContent = counts.cross_exchange;
+            document.getElementById('totalWeather').textContent = counts.weather;
+            document.getElementById('totalEcon').textContent = counts.economic;
+        }
+
         function renderOpps() {
             const container = document.getElementById('oppContainer');
             let opps = allOpps;
@@ -448,6 +556,12 @@
                 opps = allOpps.filter(o => o.type === 'arbitrage');
             else if (currentFilter === 'sports')
                 opps = allOpps.filter(o => ['player_prop', 'game_market'].includes(o.type));
+            else if (currentFilter === 'cross_exchange')
+                opps = allOpps.filter(o => o.type === 'cross_exchange');
+            else if (currentFilter === 'weather')
+                opps = allOpps.filter(o => o.type === 'weather');
+            else if (currentFilter === 'economic')
+                opps = allOpps.filter(o => o.type === 'economic');
             else if (currentFilter === 'strong')
                 opps = allOpps.filter(o => o.edge >= 4);
 
@@ -455,19 +569,24 @@
                 container.innerHTML = `
                     <div class="empty">
                         <div class="icon">✅</div>
-                        <div>No +EV opportunities right now</div>
-                        <div style="margin-top:8px; font-size:0.9em;">
-                            All lines are fairly priced after accounting for juice
-                        </div>
+                        <div>No +EV opportunities in this filter</div>
                     </div>`;
                 return;
             }
 
             container.innerHTML = opps.map(opp => {
                 const isArb = opp.type === 'arbitrage';
-                const cls = isArb ? 'arb' : (opp.edge >= 6 ? 'elite' : opp.edge >= 4 ? 'strong' : '');
-                const color = isArb ? '#ffd700' : (opp.edge >= 6 ? '#ff4757' : opp.edge >= 4 ? '#ffa502' : '#48bb78');
-                const typeIcon = isArb ? '💰' : '⚡';
+                const isCross = opp.type === 'cross_exchange';
+                const isWeather = opp.type === 'weather';
+                const isEcon = opp.type === 'economic';
+                let cls = '', color = '#48bb78', typeIcon = '⚡';
+                if (isArb)       { cls = 'arb';     color = '#ffd700'; typeIcon = '💰'; }
+                else if (isCross)   { cls = 'cross';   color = '#e040fb'; typeIcon = '🔀'; }
+                else if (isWeather) { cls = 'weather'; color = '#00bcd4'; typeIcon = '🌡️'; }
+                else if (isEcon)    { cls = 'econ';    color = '#ff9800'; typeIcon = '📊'; }
+                else if (opp.edge >= 6) { cls = 'elite';  color = '#ff4757'; }
+                else if (opp.edge >= 4) { cls = 'strong'; color = '#ffa502'; }
+
                 const bookBadges = {
                     'FanDuel': 'badge-fd', 'DraftKings': 'badge-dk',
                     'BetMGM': 'badge-mgm', 'BetRivers': 'badge-br',
@@ -476,16 +595,11 @@
                 };
                 const bookBadge = bookBadges[opp.book] || 'badge-book';
 
-                // Gross edge display
                 const grossEdge = opp.gross_edge !== undefined ? opp.gross_edge : opp.edge;
                 const grossHtml = (!isArb && grossEdge !== opp.edge)
-                    ? `<div class="opp-gross">Gross: +${grossEdge}%</div>`
-                    : '';
-
-                // Edge label
+                    ? `<div class="opp-gross">Gross: +${grossEdge}%</div>` : '';
                 const edgeLabel = isArb ? 'guaranteed' : 'net of vig';
 
-                // Fair value bar (not for arbs)
                 let fairBarHtml = '';
                 if (!isArb && opp.target_prob && opp.fair_prob) {
                     const tp = opp.target_prob;
@@ -498,8 +612,7 @@
                             </div>
                             <div class="fair-bar-track">
                                 <div class="fair-bar-fill" style="width:${fp}%;"></div>
-                                <div class="fair-bar-marker" style="left:${tp}%;"
-                                     title="${opp.book} implied: ${tp}%"></div>
+                                <div class="fair-bar-marker" style="left:${tp}%;"></div>
                             </div>
                             <div class="fair-bar-edge-label">
                                 ${opp.book} is underpricing this by ${opp.edge}%
@@ -507,7 +620,6 @@
                         </div>`;
                 }
 
-                // Staking info for arbs
                 let stakeHtml = '';
                 if (isArb) {
                     const sa = opp.stake_a || opp.stake_over || 50;
@@ -520,17 +632,33 @@
                         </div>`;
                 }
 
-                // Juice/combined display
                 let juiceHtml = '';
                 if (opp.juice_display) {
                     const juiceLabel = isArb ? 'Combined implied' : 'Vig';
                     juiceHtml = `<span style="color:#888; font-size:0.75em;"> · ${juiceLabel}: ${opp.juice_display}</span>`;
                 }
 
-                // Book badge - arbs show both books as text, not badge
                 const badgeHtml = isArb
                     ? `<span class="badge badge-market">${opp.book}</span>`
                     : `<span class="badge ${bookBadge}">${opp.book}</span>`;
+
+                // Affiliate buttons
+                let actionRow = '';
+                if (isArb) {
+                    const urlA = opp.affiliate_url_a || '';
+                    const urlB = opp.affiliate_url_b || '';
+                    if (urlA || urlB) {
+                        const btnA = urlA ? `<a class="action-btn" href="${urlA}" target="_blank" rel="nofollow noopener">Open Book A →</a>` : '';
+                        const btnB = urlB ? `<a class="action-btn" href="${urlB}" target="_blank" rel="nofollow noopener">Open Book B →</a>` : '';
+                        actionRow = `<div class="action-row">${btnA}${btnB}</div>`;
+                    }
+                } else if (opp.affiliate_url) {
+                    actionRow = `<div class="action-row">
+                        <a class="action-btn" href="${opp.affiliate_url}" target="_blank" rel="nofollow noopener">
+                            Bet on ${opp.book} →
+                        </a>
+                    </div>`;
+                }
 
                 return `
                     <div class="opp ${cls}">
@@ -577,50 +705,45 @@
                                 <span style="color:#666; font-weight:400;">(${opp.kelly_fraction}% of bankroll)</span>
                             </div>` : ''}
                         </div>
+
+                        ${actionRow}
                     </div>`;
             }).join('');
         }
 
-        // ---- ODDS SEARCH ----
+        // ===================== SEARCH =====================
         async function searchOdds() {
             const q = document.getElementById('searchQuery').value.trim();
             const type = document.getElementById('searchType').value;
             if (!q) return;
 
-            const key = document.getElementById('scanKey').value;
+            const key = getScanKey();
             const status = document.getElementById('searchStatus');
             const container = document.getElementById('searchResults');
-
-            status.textContent = `Searching "${q}"... (uses API calls)`;
+            status.textContent = `Searching "${q}"...`;
             status.style.color = '#ffa502';
             container.innerHTML = '';
 
             try {
-                const resp = await fetch(`/api/search?q=${encodeURIComponent(q)}&type=${type}`);
+                const resp = await fetch(`/api/search?q=${encodeURIComponent(q)}&type=${type}&key=${encodeURIComponent(key)}`);
+                if (resp.status === 403) {
+                    status.textContent = '🔒 Invalid key';
+                    status.style.color = '#ff4757';
+                    return;
+                }
                 const data = await resp.json();
-
                 if (data.error) {
                     status.textContent = data.error;
                     status.style.color = '#ff4757';
                     return;
                 }
-
                 if (!data.results || data.results.length === 0) {
-                    status.textContent = `No results for "${q}" — try a different name or check spelling`;
+                    status.textContent = `No results for "${q}"`;
                     status.style.color = '#999';
                     return;
                 }
-
                 status.textContent = `${data.count} result${data.count !== 1 ? 's' : ''} for "${q}"`;
                 status.style.color = '#48bb78';
-
-                const bettableBadge = (bk) => {
-                    const badges = {
-                        'FanDuel': '🟦', 'DraftKings': '🟩', 'BetMGM': '🟨',
-                        'BetRivers': '🟪', 'theScore Bet': '🟫', 'Hard Rock': '🟥', 'Bally Bet': '🟧'
-                    };
-                    return badges[bk] || '⬜';
-                };
 
                 const fmtOdds = (odds) => odds > 0 ? `+${odds}` : `${odds}`;
                 const oddsColor = (bettable, isBest) =>
@@ -636,20 +759,15 @@
                                     color:${oddsColor(b.bettable, i===0)}; font-size:1.1em;">
                                     ${fmtOdds(b.odds)}</td>
                             </tr>`).join('');
-
                         return `<div style="background:#16213e; border:1px solid #333; border-radius:10px;
                                     margin-bottom:10px; overflow:hidden;">
-                            <div style="padding:12px 15px; border-bottom:1px solid #333; display:flex;
-                                        justify-content:space-between; align-items:center;">
-                                <div>
-                                    <strong style="color:#fff;">${r.player}</strong>
-                                    <span style="color:#999; font-size:0.85em;"> ML</span>
-                                </div>
-                                <span style="color:#666; font-size:0.8em;">${r.sport} · ${r.game}</span>
+                            <div style="padding:12px 15px; border-bottom:1px solid #333;">
+                                <strong style="color:#fff;">${r.player}</strong>
+                                <span style="color:#999; font-size:0.85em;"> ML</span>
+                                <div style="color:#666; font-size:0.8em; margin-top:2px;">${r.sport} · ${r.game}</div>
                             </div>
                             <table style="width:100%; border-collapse:collapse; font-size:0.9em;">${rows}</table>
                         </div>`;
-
                     } else if (r.type === 'prop') {
                         const makeRows = (side, label) => {
                             const entries = r[side] || [];
@@ -665,19 +783,14 @@
                                         ${fmtOdds(b.odds)}</td>
                                 </tr>`).join('');
                         };
-
                         const overRows = makeRows('over', `O ${r.line}`);
                         const underRows = makeRows('under', `U ${r.line}`);
-
                         return `<div style="background:#16213e; border:1px solid #333; border-radius:10px;
                                     margin-bottom:10px; overflow:hidden;">
-                            <div style="padding:12px 15px; border-bottom:1px solid #333; display:flex;
-                                        justify-content:space-between; align-items:center;">
-                                <div>
-                                    <strong style="color:#fff;">${r.player}</strong>
-                                    <span style="color:#999; font-size:0.85em;"> ${r.market} ${r.line}</span>
-                                </div>
-                                <span style="color:#666; font-size:0.8em;">${r.sport} · ${r.game}</span>
+                            <div style="padding:12px 15px; border-bottom:1px solid #333;">
+                                <strong style="color:#fff;">${r.player}</strong>
+                                <span style="color:#999; font-size:0.85em;"> ${r.market} ${r.line}</span>
+                                <div style="color:#666; font-size:0.8em; margin-top:2px;">${r.sport} · ${r.game}</div>
                             </div>
                             <table style="width:100%; border-collapse:collapse; font-size:0.9em;">
                                 ${overRows}
@@ -688,13 +801,216 @@
                     }
                     return '';
                 }).join('');
-
             } catch (err) {
                 status.textContent = `Error: ${err.message}`;
                 status.style.color = '#ff4757';
             }
         }
 
+        // ===================== HISTORY =====================
+        async function loadHistory() {
+            const key = getScanKey();
+            const container = document.getElementById('historyContent');
+            container.innerHTML = 'Loading...';
+            try {
+                const resp = await fetch(`/api/history?key=${encodeURIComponent(key)}&limit=200`);
+                if (resp.status === 403) {
+                    container.innerHTML = '🔒 Invalid key';
+                    return;
+                }
+                const data = await resp.json();
+                if (!data.opportunities || !data.opportunities.length) {
+                    container.innerHTML = '<div style="color:#888; padding:20px; text-align:center;">No history yet — run a scan first.</div>';
+                    return;
+                }
+                const fmtDate = (iso) => {
+                    try {
+                        const d = new Date(iso);
+                        return d.toLocaleString('en-US', {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
+                    } catch { return iso; }
+                };
+                const clvDisplay = (o) => {
+                    if (o.clv == null) return '';
+                    const clv = Number(o.clv);
+                    const color = clv >= 0 ? '#48bb78' : '#ff4757';
+                    const sign = clv >= 0 ? '+' : '';
+                    const close = (o.closing_odds != null)
+                        ? ` <span style="color:#666; font-weight:400;">(close: ${o.closing_odds > 0 ? '+' : ''}${o.closing_odds})</span>`
+                        : '';
+                    return `<span style="color:${color}; font-weight:700; font-size:0.85em;
+                        margin-left:10px; padding:2px 8px; background:${clv >= 0 ? '#0d2818' : '#2a0d14'};
+                        border-radius:4px;">CLV ${sign}${clv.toFixed(2)}%</span>${close}`;
+                };
+                container.innerHTML = `
+                    <div style="color:#888; font-size:0.85em; margin-bottom:10px;">
+                        Showing ${data.count} of ${data.total} total flagged opportunities
+                    </div>
+                    ` + data.opportunities.map(o => `
+                    <div class="history-row">
+                        <span class="history-edge">+${(o.edge || 0).toFixed(1)}%</span>
+                        <strong>${o.player || '?'}</strong> — ${o.recommendation || ''}
+                        ${clvDisplay(o)}
+                        <div class="history-meta">
+                            ${fmtDate(o.scan_time)} · ${o.book} · ${o.market} · ${o.bet_type}
+                            ${o.odds ? ` · ${o.odds > 0 ? '+' : ''}${o.odds}` : ''}
+                        </div>
+                    </div>
+                `).join('');
+            } catch (e) {
+                container.innerHTML = `Error: ${e.message}`;
+            }
+        }
+
+        async function runClvUpdate() {
+            const key = getScanKey();
+            const btn = document.getElementById('clvBtn');
+            const status = document.getElementById('clvStatus');
+            btn.disabled = true;
+            btn.textContent = '⏳ Updating...';
+            status.textContent = 'Fetching closing odds for games starting soon...';
+            status.style.color = '#ffa502';
+            try {
+                const resp = await fetch(`/api/update-clv?key=${encodeURIComponent(key)}`, { method: 'POST' });
+                if (resp.status === 403) {
+                    status.textContent = '🔒 Invalid key';
+                    status.style.color = '#ff4757';
+                } else {
+                    const data = await resp.json();
+                    status.textContent = `✓ Updated CLV for ${data.updated} bet${data.updated !== 1 ? 's' : ''}`;
+                    status.style.color = data.updated > 0 ? '#48bb78' : '#888';
+                    if (data.updated > 0) loadHistory();
+                }
+            } catch (e) {
+                status.textContent = `Error: ${e.message}`;
+                status.style.color = '#ff4757';
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '📈 Update CLV';
+            }
+        }
+
+        function exportCsv() {
+            const key = getScanKey();
+            window.open(`/api/export.csv?key=${encodeURIComponent(key)}`, '_blank');
+            return false;
+        }
+
+        // ===================== STATS =====================
+        async function loadStats() {
+            const key = getScanKey();
+            const container = document.getElementById('statsContent');
+            container.innerHTML = 'Loading...';
+            try {
+                const resp = await fetch(`/api/stats?key=${encodeURIComponent(key)}`);
+                if (resp.status === 403) {
+                    container.innerHTML = '🔒 Invalid key';
+                    return;
+                }
+                const data = await resp.json();
+                if (data.error) {
+                    container.innerHTML = `Error: ${data.error}`;
+                    return;
+                }
+                const fmt = (n) => n == null ? '—' : Number(n).toFixed(1);
+                const fmtClv = (n, count) => {
+                    if (n == null || !count) return '—';
+                    const v = Number(n);
+                    const color = v >= 0 ? '#48bb78' : '#ff4757';
+                    const sign = v >= 0 ? '+' : '';
+                    return `<span style="color:${color};">${sign}${v.toFixed(2)}%</span>
+                        <span style="color:#666; font-size:0.8em;"> (n=${count})</span>`;
+                };
+
+                // Overall CLV hero
+                const oc = data.overall_clv || {};
+                const ocCount = oc.n || 0;
+                const ocAvg = oc.avg_clv;
+                const ocBeat = oc.beat || 0;
+                const ocBeatPct = ocCount > 0 ? ((ocBeat / ocCount) * 100).toFixed(0) : '—';
+                let clvHero = '';
+                if (ocCount > 0) {
+                    const color = ocAvg >= 0 ? '#48bb78' : '#ff4757';
+                    const sign = ocAvg >= 0 ? '+' : '';
+                    clvHero = `
+                        <div class="stats-section" style="border-left:4px solid ${color};">
+                            <h3>Closing Line Value (CLV)</h3>
+                            <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:8px;">
+                                <div style="text-align:center;">
+                                    <div style="font-size:1.6em; font-weight:800; color:${color};">${sign}${Number(ocAvg).toFixed(2)}%</div>
+                                    <div style="font-size:0.7em; color:#888;">Average CLV</div>
+                                </div>
+                                <div style="text-align:center;">
+                                    <div style="font-size:1.6em; font-weight:800; color:#fff;">${ocBeatPct}%</div>
+                                    <div style="font-size:0.7em; color:#888;">Bets beat the close</div>
+                                </div>
+                                <div style="text-align:center;">
+                                    <div style="font-size:1.6em; font-weight:800; color:#fff;">${ocCount}</div>
+                                    <div style="font-size:0.7em; color:#888;">Bets with CLV data</div>
+                                </div>
+                            </div>
+                            <div style="font-size:0.75em; color:#888; margin-top:10px; line-height:1.5;">
+                                Positive CLV = you beat the closing line, which is the best long-run predictor of profit.
+                                Background worker captures every 30 min for games starting in the next 2 hours.
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    clvHero = `<div class="stats-section" style="border-left:4px solid #555;">
+                        <h3>Closing Line Value (CLV)</h3>
+                        <div style="color:#888; font-size:0.85em;">
+                            No CLV data yet. The background worker captures closing odds for sports bets in the
+                            2 hours before each game starts. Check back after games have tipped off.
+                        </div>
+                    </div>`;
+                }
+
+                const typeRows = (data.by_type || []).map(r => `
+                    <tr><td>${r.bet_type || '—'}</td><td>${r.n}</td>
+                    <td>${fmt(r.avg_edge)}%</td><td>${fmt(r.avg_kelly)}%</td>
+                    <td>${fmtClv(r.avg_clv, r.clv_n)}</td></tr>`).join('');
+
+                const bookRows = (data.by_book || []).map(r => `
+                    <tr><td>${r.book || '—'}</td><td>${r.n}</td>
+                    <td>${fmt(r.avg_edge)}%</td>
+                    <td>${fmtClv(r.avg_clv, r.clv_n)}</td></tr>`).join('');
+
+                const dayRows = (data.by_day || []).slice(0, 14).map(r => `
+                    <tr><td>${r.day}</td><td>${r.n}</td>
+                    <td>${fmt(r.avg_edge)}%</td>
+                    <td>${fmtClv(r.avg_clv, r.clv_n)}</td></tr>`).join('');
+
+                container.innerHTML = `
+                    <div style="color:#888; font-size:0.85em; margin-bottom:10px;">
+                        Total logged: <strong style="color:#fff;">${data.total}</strong> ·
+                        With CLV: <strong style="color:#fff;">${data.with_clv || 0}</strong>
+                    </div>
+                    ${clvHero}
+                    <div class="stats-section">
+                        <h3>By Type</h3>
+                        <table class="stats-table">
+                            <tr><th>Type</th><th>Count</th><th>Avg Edge</th><th>Avg Kelly</th><th>Avg CLV</th></tr>
+                            ${typeRows}
+                        </table>
+                    </div>
+                    <div class="stats-section">
+                        <h3>By Book (Top 15)</h3>
+                        <table class="stats-table">
+                            <tr><th>Book</th><th>Count</th><th>Avg Edge</th><th>Avg CLV</th></tr>
+                            ${bookRows}
+                        </table>
+                    </div>
+                    <div class="stats-section">
+                        <h3>Last 14 Days</h3>
+                        <table class="stats-table">
+                            <tr><th>Day</th><th>Count</th><th>Avg Edge</th><th>Avg CLV</th></tr>
+                            ${dayRows}
+                        </table>
+                    </div>
+                `;
+            } catch (e) {
+                container.innerHTML = `Error: ${e.message}`;
+            }
+        }
     </script>
 </body>
 </html>
