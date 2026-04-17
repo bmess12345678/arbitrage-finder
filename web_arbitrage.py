@@ -33,9 +33,16 @@ app = Flask(__name__)
 
 SCAN_KEY = os.environ.get('SCAN_KEY', '')
 
-# API keys from env var (comma-separated). Falls back to single ODDS_API_KEY.
+# API keys: prefer env var, fall back to hardcoded. User accepts public-Git
+# exposure of these; rotate whenever you want via ODDS_API_KEYS env var.
+_HARDCODED_API_KEYS = [
+    '19c83d1862fae7f7f95ef03e9b5ebb21',
+    '1c09147bb0d7eea93c47f3fd9ba6ba5b',
+    '836b2b1d9f9c83f91eee3728fbd2f0de',
+    'a74692c6c42c48c7dcc7fda334ed0b4f',
+]
 _keys_env = os.environ.get('ODDS_API_KEYS', '') or os.environ.get('ODDS_API_KEY', '')
-API_KEYS = [k.strip() for k in _keys_env.split(',') if k.strip()]
+API_KEYS = [k.strip() for k in _keys_env.split(',') if k.strip()] or list(_HARDCODED_API_KEYS)
 
 # Lock for thread safety on key rotation and state
 _key_lock = threading.Lock()
@@ -804,12 +811,16 @@ def fetch_kalshi_sports(log_fn=None):
                                             games_matched += 1
                                             break
 
-                has_stat = any(kw in full for kw in ['points', 'rebounds', 'assists', 'three-pointer', '3-pointer', 'shots'])
-                has_action = any(kw in full for kw in ['score', 'have', 'record', 'over', 'get', 'make'])
-                has_compact = bool(re.search(r':\s*\d+\+', full))
-                if has_stat and (has_action or '+' in full):
-                    all_props.append(mkt)
-                elif has_compact:
+                # Loose filter: any stat keyword OR compact "N+" OR number-next-to-stat format.
+                # Better to over-include and let regex/LLM sort it out.
+                stat_kws = ['point', 'rebound', 'assist', 'three', '3-pointer', '3pt',
+                            'shot', 'goal', 'steal', 'block', 'turnover', 'sog', 'pts',
+                            'reb', 'ast']
+                has_stat = any(kw in full for kw in stat_kws)
+                has_numplus = bool(re.search(r'\d+\+', full))  # anything like "25+"
+                has_compact = bool(re.search(r':\s*\d+\+?', full))  # "Player: 25+"
+                has_over_under = any(kw in full for kw in ['over', 'under', 'o/u'])
+                if has_stat or has_numplus or has_compact or has_over_under:
                     all_props.append(mkt)
 
             cursor = data.get('cursor', '')
@@ -895,6 +906,7 @@ def fetch_polymarket_sports(log_fn=None):
 
         markets = resp.json() if isinstance(resp.json(), list) else []
         sports_count = 0
+        candidates = 0
 
         for m in markets:
             q = (m.get('question', '') or '').strip()
@@ -918,38 +930,69 @@ def fetch_polymarket_sports(log_fn=None):
                 continue
 
             is_futures = any(kw in q_low for kw in [
-                'championship', 'champion', 'title', 'finals', 'playoff',
-                'season', 'mvp', 'award', 'division', 'conference',
-                'win the nba', 'win the nfl', 'win the nhl',
+                'championship', 'champion', 'title', 'finals mvp', 'playoff mvp',
+                'season', 'mvp', 'roty', 'dpoy', 'award', 'division', 'conference',
+                'win the nba', 'win the nfl', 'win the nhl', 'win the mlb',
+                'first round', 'draft', 'rookie of', 'coach of',
             ])
             if is_futures:
                 continue
 
-            game_match = re.search(
-                r'(?:will|do)\s+(?:the\s+)?(.+?)\s+(?:win|beat|defeat)\s+(?:the\s+)?(.+?)[\?\.]?$',
-                q_low, re.IGNORECASE)
-            if game_match:
-                team_str = game_match.group(1).strip()
-                opponent_str = game_match.group(2).strip()
-                has_opponent = any(key in opponent_str for key in NBA_TEAMS.keys())
-                if has_opponent:
-                    for key, full_name in NBA_TEAMS.items():
-                        if key in team_str:
-                            result['games'][full_name] = yes_price
-                            sports_count += 1
-                            break
+            # Candidate: mentions any team we know about
+            has_team_ref = any(key in q_low for key in NBA_TEAMS.keys())
+            if not has_team_ref and not any(kw in q_low for kw in [
+                'points', 'rebounds', 'assists', 'score', 'record', 'goal']):
+                continue
+            candidates += 1
+
+            # -- GAME OUTCOMES --
+            # Try multiple phrasings Polymarket uses
+            game_patterns = [
+                # "Will X beat/win vs/defeat Y"
+                r'(?:will|do|does)\s+(?:the\s+)?(.+?)\s+(?:win|beat|defeat|top)\s+(?:vs\.?\s+|against\s+|the\s+)?(.+?)[\?\.]?$',
+                # "X vs Y - X winner" style
+                r'(?:the\s+)?(.+?)\s+vs\.?\s+(?:the\s+)?(.+?)\s*[-–—]',
+                # "X @ Y" style
+                r'(?:the\s+)?(.+?)\s+@\s+(?:the\s+)?(.+?)(?:[\?\.]|$)',
+            ]
+            matched_game = False
+            for pat in game_patterns:
+                gm = re.search(pat, q_low, re.IGNORECASE)
+                if not gm:
+                    continue
+                team_str = gm.group(1).strip()
+                opp_str = gm.group(2).strip()
+                home_team = None
+                for key, full_name in NBA_TEAMS.items():
+                    if key in team_str:
+                        home_team = full_name
+                        break
+                has_opp = any(key in opp_str for key in NBA_TEAMS.keys())
+                if home_team and has_opp:
+                    result['games'][home_team] = yes_price
+                    sports_count += 1
+                    matched_game = True
+                    break
+            if matched_game:
                 continue
 
+            # -- PLAYER PROPS --
+            # Broader pattern covering "X scores N+ points", "X has N rebounds",
+            # "X records N assists", "Will X have N+ ..."
             prop_match = re.search(
-                r'(?:will\s+)?(.+?)\s+(?:score|have|record|get)\s+(\d+(?:\.\d+)?)\+?\s*'
-                r'(points?|rebounds?|assists?|three)',
+                r'(?:will\s+)?([a-zA-Z][a-zA-Z\.\-\' ]+?)\s+'
+                r'(?:score|scores|have|has|record|records|get|gets|make|makes|hit|hits|reach|reaches|go\s+over|tally)\s+'
+                r'(\d+(?:\.\d+)?)\+?\s*'
+                r'(points?|pts?|rebounds?|rebs?|assists?|asts?|three[s\-]?|3[- ]?pointers?|shots?|sog|goals?)',
                 q_low, re.IGNORECASE)
             if prop_match:
                 player = prop_match.group(1).strip()
+                # Strip common prefixes
+                player = re.sub(r'^(will|do|does|the)\s+', '', player, flags=re.IGNORECASE).strip()
                 line_raw = float(prop_match.group(2))
                 stat = prop_match.group(3)
                 mkt = kalshi_stat_to_market(stat)
-                if mkt:
+                if mkt and 3 < len(player) < 40:
                     line = (line_raw - 0.5) if line_raw == int(line_raw) else line_raw
                     norm = normalize_player_name(player)
                     if norm not in result['props']:
@@ -959,7 +1002,7 @@ def fetch_polymarket_sports(log_fn=None):
                     result['props'][norm][mkt][line] = yes_price
                     sports_count += 1
 
-        log(f"  Polymarket: {len(markets)} total markets, {sports_count} sports matched")
+        log(f"  Polymarket: {len(markets)} markets, {candidates} candidates, {sports_count} matched")
         log(f"    Games: {len(result['games'])} teams, Props: {len(result['props'])} players")
 
     except Exception as e:
@@ -2432,6 +2475,11 @@ def trigger_scan():
 
 @app.route('/api/opportunities')
 def get_opportunities():
+    warnings = []
+    if not API_KEYS:
+        warnings.append('No Odds API keys configured — sports scanning disabled. Set ODDS_API_KEYS env var.')
+    if not LLM_PARSER_ENABLED:
+        warnings.append('LLM Kalshi parser disabled — set ANTHROPIC_API_KEY for better Kalshi parsing.')
     with _state_lock:
         return jsonify({
             'opportunities': state['opportunities'],
@@ -2441,6 +2489,7 @@ def get_opportunities():
             'debug': state.get('debug_info', []),
             'bankroll': DEFAULT_BANKROLL,
             'scan_id': state.get('scan_id'),
+            'warnings': warnings,
         })
 
 @app.route('/api/key-status')
@@ -2466,6 +2515,97 @@ def key_status():
 # ============================================================
 # HISTORY & CLV ENDPOINTS (new — for performance tracking)
 # ============================================================
+
+@app.route('/api/diagnose')
+def diagnose():
+    """Dump sample market titles from each source so we can see what's actually
+    being returned. Run this when filters aren't matching anything."""
+    auth_err = _auth_check()
+    if auth_err:
+        return auth_err
+    out = {}
+
+    # Kalshi — first 30 open markets
+    try:
+        resp = kalshi_get(f"{KALSHI_API}/markets",
+            params={'status': 'open', 'limit': 30}, timeout=15)
+        if resp.status_code == 200:
+            mkts = resp.json().get('markets', [])
+            out['kalshi_sample'] = [{
+                'title': m.get('title', ''),
+                'subtitle': m.get('subtitle', ''),
+                'yes_sub_title': m.get('yes_sub_title', ''),
+                'event_ticker': m.get('event_ticker', ''),
+                'series_ticker': m.get('series_ticker', ''),
+                'yes_bid': m.get('yes_bid'),
+                'yes_ask': m.get('yes_ask'),
+            } for m in mkts[:30]]
+        else:
+            out['kalshi_sample'] = f"HTTP {resp.status_code}"
+    except Exception as e:
+        out['kalshi_sample'] = f"error: {e}"
+
+    # Kalshi — sports-specific series search
+    try:
+        sports_series = ['KXNBAPOINTS', 'KXNBAREB', 'KXNBAASSISTS', 'KXNBAGAME',
+                         'KXNHLPOINTS', 'KXNHLSOG', 'KXNCAAB', 'NBAGAME', 'NHLGAME']
+        found_series = {}
+        for s in sports_series:
+            try:
+                r = kalshi_get(f"{KALSHI_API}/markets",
+                    params={'series_ticker': s, 'status': 'open', 'limit': 5}, timeout=10)
+                if r.status_code == 200:
+                    ms = r.json().get('markets', [])
+                    if ms:
+                        found_series[s] = [m.get('title', '') for m in ms[:5]]
+                time.sleep(0.5)
+            except:
+                pass
+        out['kalshi_sports_series'] = found_series
+    except Exception as e:
+        out['kalshi_sports_series'] = f"error: {e}"
+
+    # Polymarket — first 30 markets
+    try:
+        resp = requests.get(f"{POLYMARKET_API}/markets",
+            params={'closed': 'false', 'limit': 30, 'active': 'true', 'tag': 'sports'},
+            timeout=15)
+        if resp.status_code == 200:
+            mkts = resp.json()
+            if isinstance(mkts, list):
+                out['polymarket_sports_sample'] = [{
+                    'question': m.get('question', ''),
+                    'outcomes': m.get('outcomes', ''),
+                    'outcomePrices': m.get('outcomePrices', ''),
+                    'volume': m.get('volume', 0),
+                } for m in mkts[:30]]
+            else:
+                out['polymarket_sports_sample'] = 'unexpected response shape'
+        else:
+            out['polymarket_sports_sample'] = f"HTTP {resp.status_code}"
+    except Exception as e:
+        out['polymarket_sports_sample'] = f"error: {e}"
+
+    # Also try without the sports tag
+    try:
+        resp = requests.get(f"{POLYMARKET_API}/markets",
+            params={'closed': 'false', 'limit': 30, 'active': 'true'},
+            timeout=15)
+        if resp.status_code == 200:
+            mkts = resp.json()
+            if isinstance(mkts, list):
+                out['polymarket_any_sample'] = [m.get('question', '') for m in mkts[:30]]
+    except Exception as e:
+        out['polymarket_any_sample'] = f"error: {e}"
+
+    # Config sanity
+    out['config'] = {
+        'api_keys_count': len(API_KEYS),
+        'llm_enabled': LLM_PARSER_ENABLED,
+        'kalshi_key_set': bool(KALSHI_API_KEY),
+        'db_path': DB_PATH,
+    }
+    return jsonify(out)
 
 @app.route('/api/update-clv', methods=['POST', 'GET'])
 def trigger_clv_update():
