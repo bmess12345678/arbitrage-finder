@@ -25,6 +25,8 @@ from contextlib import contextmanager
 import threading
 import os
 
+import providers  # free direct-feed odds layer (Pinnacle/DK/FD/MGM/BetRivers)
+
 app = Flask(__name__)
 
 # ============================================================
@@ -120,6 +122,7 @@ GAME_MARKETS = [
     ('basketball_nba', 'h2h', 'NBA Moneyline'),
     ('basketball_ncaab', 'h2h', 'NCAAB Moneyline'),
     ('icehockey_nhl', 'h2h', 'NHL Moneyline'),
+    ('soccer_fifa_world_cup', 'h2h', 'World Cup Moneyline'),  # 3-way; handled by n-way devig
 ]
 
 PROP_MARKETS = [
@@ -661,6 +664,20 @@ def fetch_odds(sport, market):
         log_debug(f"  {sport}/{market}: [cache hit]")
         return cached
 
+    # Direct free feeds first (Pinnacle/DK/FD/MGM/BetRivers)
+    if providers.ENABLED:
+        try:
+            data = providers.fetch_odds(sport, market, log=log_debug)
+        except Exception as e:
+            log_debug(f"  {sport}/{market}: direct feeds error - {str(e)[:80]}")
+            data = None
+        if data:
+            log_debug(f"  {sport}/{market}: {len(data)} games (direct feeds)")
+            _cache_set(cache_key, data)
+            return data
+        if not API_KEYS:
+            return None
+
     key = get_api_key()
     if not key:
         log_debug(f"  {sport}/{market}: All keys exhausted!")
@@ -695,6 +712,19 @@ def fetch_events(sport):
     if cached is not None:
         return cached
 
+    if providers.ENABLED:
+        try:
+            events = providers.fetch_events(sport, log=log_debug)
+        except Exception as e:
+            log_debug(f"  {sport} events: direct feeds error - {str(e)[:60]}")
+            events = []
+        if events:
+            log_debug(f"  {sport}: {len(events)} events (direct feeds)")
+            _cache_set(cache_key, events)
+            return events
+        if not API_KEYS:
+            return []
+
     key = get_api_key()
     if not key:
         return []
@@ -718,6 +748,19 @@ def fetch_event_odds(sport, event_id, market):
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
+
+    if providers.ENABLED:
+        try:
+            data = providers.fetch_event_odds(sport, event_id, market, log=log_debug)
+        except Exception as e:
+            log_debug(f"  {sport} event odds: direct feeds error - {str(e)[:60]}")
+            data = None
+        if data:
+            _cache_set(cache_key, data)
+            return data
+        # Direct-feed event ids don't exist at The Odds API; no fallback per-event
+        if str(event_id).startswith(sport + '|') or not API_KEYS:
+            return None
 
     key = get_api_key()
     if not key:
@@ -1046,12 +1089,15 @@ def analyze_game_markets(games_data, market_name="", poly_games=None, kalshi_gam
             keys = list(pairs.keys())
             if len(keys) < 2:
                 continue
-            k1, k2 = keys[0], keys[1]
-            imp1 = american_to_implied(pairs[k1])
-            imp2 = american_to_implied(pairs[k2])
-            book_juice[bk] = round((imp1 + imp2 - 1.0) * 100, 1)
-            f1, f2 = devig_pair(imp1, imp2)
-            book_devigged[bk] = {k1: clamp_prob(f1), k2: clamp_prob(f2)}
+            # n-way multiplicative devig: identical to devig_pair for 2 outcomes,
+            # correct for 3-way soccer moneylines (home/draw/away)
+            imps = {k: american_to_implied(pairs[k]) for k in keys}
+            total_imp = sum(imps.values())
+            if total_imp <= 0:
+                continue
+            book_juice[bk] = round((total_imp - 1.0) * 100, 1)
+            book_devigged[bk] = {k: clamp_prob(v / total_imp)
+                                 for k, v in imps.items()}
 
         if len(book_devigged) < 3:
             continue
@@ -1398,7 +1444,48 @@ def find_game_arbs(games_data, market_name=""):
         for bk in book_odds:
             all_keys.update(book_odds[bk].keys())
         keys_list = sorted(all_keys, key=str)
-        if len(keys_list) < 2:
+
+        # 3-way moneylines (soccer): a real arb needs ALL THREE legs.
+        # Best home + best away always sums < 100% when a draw exists, so the
+        # 2-leg path below would emit fake "guaranteed profit" rows. Handle here.
+        if len(keys_list) == 3 and all(k[1] is None for k in keys_list):
+            best = {}
+            for k in keys_list:
+                for bk in book_odds:
+                    if bk not in CO_BETTABLE or k not in book_odds[bk]:
+                        continue
+                    o = book_odds[bk][k]
+                    if k not in best or american_to_implied(o) < american_to_implied(best[k][0]):
+                        best[k] = (o, bk)
+            if len(best) == 3:
+                imps = {k: american_to_implied(v[0]) for k, v in best.items()}
+                total3 = sum(imps.values())
+                if total3 < 1.0 and len({v[1] for v in best.values()}) >= 2:
+                    profit_pct = round((1.0 - total3) * 100, 2)
+                    legs = ' + '.join(
+                        f"{k[0]} @ {BOOK_DISPLAY.get(best[k][1], best[k][1])} "
+                        f"{format_american(best[k][0])}" for k in keys_list)
+                    arbs.append({
+                        'player': f"ARB (3-way): {' / '.join(k[0] for k in keys_list)}",
+                        'game': game_info, 'commence': commence, 'market': market_name,
+                        'book': ' / '.join(sorted({BOOK_DISPLAY.get(v[1], v[1])
+                                                   for v in best.values()})),
+                        'type': 'arbitrage', 'edge': profit_pct, 'gross_edge': profit_pct,
+                        'recommendation': f"Guaranteed {profit_pct}% profit: {legs}",
+                        'odds': best[keys_list[0]][0],
+                        'label1_name': 'Legs', 'label1_value': legs,
+                        'label2_name': 'Combined Implied',
+                        'label2_value': f"{round(total3 * 100, 1)}%",
+                        'label3_name': 'Guaranteed Profit',
+                        'label3_value': f"+{profit_pct}%",
+                        'target_prob': round(total3 * 100, 1), 'fair_prob': 100.0,
+                        'juice_display': f"{round(total3 * 100, 1)}% combined",
+                        'stake_a': round(100 * imps[keys_list[0]] / total3, 2),
+                        'stake_b': round(100 * imps[keys_list[1]] / total3, 2),
+                    })
+            continue
+
+        if len(keys_list) != 2:
             continue
 
         side_a_key = keys_list[0]
@@ -1563,7 +1650,7 @@ def fetch_event_props(sport, prop_markets, max_events=8, kalshi_props=None, poly
         home = event.get('home_team', '?')
         away = event.get('away_team', '?')
         for prop_market, prop_name in prop_markets:
-            if len(_dead_keys) >= len(API_KEYS):
+            if API_KEYS and len(_dead_keys) >= len(API_KEYS) and not providers.ENABLED:
                 log_debug("    All keys exhausted — stopping")
                 return all_opps, all_arbs
             edata = fetch_event_odds(sport, eid, prop_market)
@@ -2173,8 +2260,8 @@ def scan_markets():
 
     log_debug("=== SCAN STARTED ===")
     log_debug(f"Scan ID: {scan_id}")
-    if not API_KEYS:
-        log_debug("⚠️  No ODDS_API_KEYS configured in env — sports scanning will be skipped")
+    if True:
+        log_debug("Direct feeds: " + ("ON (Pinnacle/DK/FD/MGM/BetRivers)" if providers.ENABLED else "OFF") + (" | Odds API fallback: " + str(len(API_KEYS)) + " keys" if API_KEYS else " | no Odds API keys"))
     log_debug(f"Bettable: {', '.join(BOOK_DISPLAY.get(b, b) for b in CO_BETTABLE)}")
     log_debug(f"Consensus: + {', '.join(BOOK_DISPLAY.get(b, b) for b in CONSENSUS_ONLY)} + Kalshi + Polymarket")
     log_debug(f"Strategy: CO book vs weighted consensus (Pinnacle/Kalshi/Poly 3x) | Min edge: {MIN_EDGE_NET}%")
@@ -2203,10 +2290,10 @@ def scan_markets():
               f"Poly {len(poly_props)} players / {len(poly_games)} games")
 
     # ---- Sports: Player Props ----
-    if API_KEYS:
+    if API_KEYS or providers.ENABLED:
         log_debug("--- Player Props ---")
         for sport, prop_markets, max_ev in PROP_MARKETS:
-            if len(_dead_keys) >= len(API_KEYS):
+            if API_KEYS and len(_dead_keys) >= len(API_KEYS) and not providers.ENABLED:
                 log_debug("  All keys exhausted — stopping props")
                 break
             try:
@@ -2220,7 +2307,7 @@ def scan_markets():
         # ---- Sports: Moneylines ----
         log_debug("--- Moneylines ---")
         for sport, market, name in GAME_MARKETS:
-            if len(_dead_keys) >= len(API_KEYS):
+            if API_KEYS and len(_dead_keys) >= len(API_KEYS) and not providers.ENABLED:
                 log_debug("  All keys exhausted — stopping moneylines")
                 break
             try:
@@ -2473,11 +2560,30 @@ def trigger_scan():
     threading.Thread(target=scan_markets, daemon=True).start()
     return jsonify({'success': True})
 
+@app.route('/api/ingest', methods=['POST'])
+def api_ingest():
+    """Accept odds snapshots pushed from fetch_worker.py (residential IP mode)."""
+    auth_err = _auth_check()
+    if auth_err:
+        return auth_err
+    try:
+        payload = request.get_json(force=True, silent=True) or {}
+        n = providers.ingest_snapshot(payload)
+        return jsonify({'success': True, 'sports_loaded': n,
+                        'feed_status': providers.status()})
+    except Exception as e:
+        return jsonify({'error': str(e)[:200]}), 400
+
+@app.route('/api/feed-status')
+def feed_status():
+    return jsonify({'direct_feeds': providers.ENABLED,
+                    'snapshots': providers.status()})
+
 @app.route('/api/opportunities')
 def get_opportunities():
     warnings = []
-    if not API_KEYS:
-        warnings.append('No Odds API keys configured — sports scanning disabled. Set ODDS_API_KEYS env var.')
+    if not API_KEYS and not providers.ENABLED:
+        warnings.append('No odds sources: direct feeds disabled and no ODDS_API_KEYS set.')
     if not LLM_PARSER_ENABLED:
         warnings.append('LLM Kalshi parser disabled — set ANTHROPIC_API_KEY for better Kalshi parsing.')
     with _state_lock:
