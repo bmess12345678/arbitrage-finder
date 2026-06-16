@@ -79,6 +79,11 @@ CLV_WINDOW_HOURS_AHEAD = int(os.environ.get('CLV_WINDOW_HOURS_AHEAD', '2'))
 DEFAULT_BANKROLL = 3000
 
 MIN_EDGE_NET = 0.1  # Minimum edge % to surface
+# Edges above this on a single market are almost always a data error
+# (stale line, wrong side, or a non-matching market sneaking in) rather than
+# a real opportunity. Real +EV vs a sharp consensus lives in the low single
+# digits; a 20%+ "edge" on a moneyline does not exist in a liquid market.
+MAX_EDGE_NET = float(os.environ.get('MAX_EDGE', '20'))
 
 # ============================================================
 # AFFILIATE LINKS (set these env vars to activate; left blank = no link shown)
@@ -1194,7 +1199,7 @@ def analyze_game_markets(games_data, market_name="", poly_games=None, kalshi_gam
                 gross_edge = (consensus_fair - eval_fair) * 100
                 juice_pct = book_juice.get(eval_book, 0)
 
-                if net_edge < MIN_EDGE_NET:
+                if net_edge < MIN_EDGE_NET or net_edge > MAX_EDGE_NET:
                     continue
 
                 name, point = key
@@ -1396,7 +1401,7 @@ def analyze_player_props(games_data, market_name="", kalshi_props=None, poly_pro
                     ]:
                         net_edge = (consensus_fair - eval_imp) * 100
                         gross_edge = (consensus_fair - eval_fair) * 100
-                        if net_edge < MIN_EDGE_NET:
+                        if net_edge < MIN_EDGE_NET or net_edge > MAX_EDGE_NET:
                             continue
 
                         fair_odds = implied_to_american(consensus_fair)
@@ -1869,7 +1874,10 @@ def _fetch_ensemble_forecast(lat, lon):
             if len(temps) >= 2:
                 mean = sum(temps) / len(temps)
                 var = sum((t - mean) ** 2 for t in temps) / len(temps)
-                return (mean, max(2.0, math.sqrt(var)))
+                # Ensemble spread is systematically under-dispersed; inflate it
+                # and floor at 3°F so the model isn't falsely overconfident
+                # (overconfidence manufactures phantom edges vs Kalshi).
+                return (mean, max(3.0, math.sqrt(var) * 1.3))
     except Exception:
         pass
 
@@ -1882,9 +1890,9 @@ def _fetch_ensemble_forecast(lat, lon):
                 mean = sum(temps) / len(temps)
                 if len(temps) >= 2:
                     var = sum((t - mean) ** 2 for t in temps) / len(temps)
-                    std = max(2.0, math.sqrt(var))
+                    std = max(3.0, math.sqrt(var) * 1.3)
                 else:
-                    std = 3.0   # no ensemble spread available; assume ~3°F
+                    std = 4.0   # single deterministic model; assume wide
                 return (mean, std)
     except Exception:
         pass
@@ -2006,34 +2014,41 @@ def fetch_weather_opps():
                 if abs(edge) < 3:
                     continue
 
-                if edge > 0:
-                    bet_action = 'BUY YES'
-                    display_edge = edge
+                # Plain-English description of what the contract pays on
+                if floor_s is not None and cap_s is not None:
+                    bucket_desc = f"high is {floor_s:.0f}\u2013{cap_s:.0f}\u00b0F"
+                elif floor_s is not None:
+                    bucket_desc = f"high is {floor_s:.0f}\u00b0F or hotter"
+                elif cap_s is not None:
+                    bucket_desc = f"high is {cap_s:.0f}\u00b0F or cooler"
                 else:
-                    bet_action = 'BUY NO'
-                    display_edge = abs(edge)
-                    model_prob = 1.0 - model_prob
-                    k_mid = 1.0 - k_mid
+                    bucket_desc = f"high is about {threshold:.0f}\u00b0F"
+
+                # Recommend whichever side the model thinks is underpriced
+                if edge >= 0:
+                    side, side_prob, side_price = 'YES', model_prob, k_mid
+                else:
+                    side, side_prob, side_price = 'NO', 1.0 - model_prob, 1.0 - k_mid
+                display_edge = abs(edge)
+                model_prob, k_mid = side_prob, side_price   # downstream fields use the chosen side
+                price_c = round(side_price * 100)
 
                 opportunities.append({
-                    'player': title[:60],
-                    'game': f"{city_key.upper()} · Ensemble high: {mean_high:.0f}°F ±{std_dev:.1f} · "
-                            + (f"Bucket: {floor_s:.0f}–{cap_s:.0f}°F" if (floor_s is not None and cap_s is not None)
-                               else f"≥{floor_s:.0f}°F" if floor_s is not None
-                               else f"≤{cap_s:.0f}°F" if cap_s is not None
-                               else f"Threshold: {threshold:.0f}°F"),
-                    'commence': '', 'market': 'Weather',
+                    'player': f"{city_key.upper()}: {bucket_desc} today",
+                    'game': f"Forecast high {mean_high:.0f}\u00b0F \u00b1{std_dev:.0f}\u00b0 (GFS ensemble) \u00b7 "
+                            f"contract pays if {bucket_desc}",
+                    'commence': '', 'market': 'Weather (Kalshi)',
                     'book': 'Kalshi', 'book_key': 'kalshi', 'type': 'weather',
                     'edge': round(display_edge, 1), 'gross_edge': round(display_edge, 1),
-                    'recommendation': f"{bet_action} on Kalshi",
+                    'recommendation': f"Buy {side} at ~{price_c}\u00a2 \u2014 model {side_prob*100:.0f}% vs market {price_c}\u00a2",
                     'odds': round(implied_to_american(clamp_prob(k_mid))) if 0 < k_mid < 1 else 0,
-                    'label1_name': 'Kalshi Price',
-                    'label1_value': f"{(mkt.get('yes_bid',0) or 0)}–{(mkt.get('yes_ask',0) or 0)}¢",
-                    'label2_name': 'Ensemble Fair', 'label2_value': f"{model_prob*100:.0f}%",
+                    'label1_name': f'Buy {side} on Kalshi',
+                    'label1_value': f"~{price_c}\u00a2",
+                    'label2_name': 'Model says', 'label2_value': f"{side_prob*100:.0f}% likely",
                     'label3_name': 'Edge', 'label3_value': f"+{display_edge:.1f}%",
                     'target_prob': round(k_mid * 100, 1),
                     'fair_prob': round(model_prob * 100, 1),
-                    'juice_display': f"±{std_dev:.1f}°F",
+                    'juice_display': f"\u00b1{std_dev:.0f}\u00b0F model spread",
                     'consensus_books': 0,
                     'kelly_fraction': round(quarter_kelly(model_prob, round(implied_to_american(clamp_prob(k_mid)))) * 100, 2) if 0 < k_mid < 1 else 0,
                     'affiliate_url': affiliate_url('kalshi'),
