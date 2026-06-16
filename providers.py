@@ -771,8 +771,26 @@ def fetch_betrivers(sport_key, log=print):
         for bo in (wrap.get('betOffers') or []):
             crit = str((bo.get('criterion') or {}).get('label', '')).lower()
             btype = str((bo.get('betOfferType') or {}).get('name', '')).lower()
-            if not ('moneyline' in crit or 'full time' in crit or
-                    btype in ('match', 'moneyline')):
+            # Many sub-markets (corners, cards, totals, handicaps) reuse the
+            # exact OT_ONE/OT_CROSS/OT_TWO 1X2 structure, so structure alone
+            # can't distinguish them. Reject anything whose label names a
+            # sub-market, then require a positive match-result signal.
+            _BLOCK = ('corner', 'card', 'booking', 'total', 'handicap',
+                      'over/under', 'both teams', 'shot', 'offside', 'throw',
+                      'foul', 'half', 'asian', 'double chance', 'draw no bet',
+                      'qualify', 'advance', 'exact', 'margin', 'method',
+                      'anytime', 'first ', 'last ', 'race to', 'odd/even',
+                      'odd or even', 'penalt', 'clean sheet', 'to nil',
+                      'period', 'minute', 'interval', 'winning margin')
+            if any(b in crit for b in _BLOCK):
+                continue
+            is_match_result = (
+                'full time' in crit or 'moneyline' in crit or 'money line' in crit
+                or '1x2' in crit
+                or crit in ('match', 'match result', 'winner', 'to win',
+                            'regular time', 'full time result', 'match odds')
+                or (btype == 'match' and not crit))
+            if not is_match_result:
                 continue
             for oc in (bo.get('outcomes') or []):
                 price = _dec_to_american((oc.get('odds') or 0) / 1000.0)
