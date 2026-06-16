@@ -99,6 +99,33 @@ SPORTS = {
         'soccer': True,
         'props': {},                        # game lines only for v1
     },
+    'baseball_mlb': {
+        'pinnacle_leagues': [],            # discovered dynamically (sport 3)
+        'pinnacle_sport': 3,
+        'pinnacle_league_match': ['mlb'],
+        'dk_groups': [84240],
+        'fd_pages': ['mlb'],
+        'mgm_sport': 23, 'mgm_match': ['mlb'],
+        'kambi_paths': ['baseball/mlb'],
+        'soccer': False,
+        'props': {
+            'player_strikeouts': ['strikeout', 'strikeouts', 'pitcher strikeouts',
+                                  'total strikeouts', 'ks recorded'],
+            'player_total_bases': ['total bases', 'total base'],
+        },
+    },
+    'basketball_wnba': {
+        'pinnacle_leagues': [],            # discovered dynamically (sport 4)
+        'pinnacle_sport': 4,
+        'pinnacle_league_match': ['wnba'],
+        'dk_groups': [94682],
+        'fd_pages': ['wnba'],
+        'mgm_sport': 7, 'mgm_match': ['wnba', 'women'],
+        'kambi_paths': ['basketball/wnba'],
+        'soccer': False,
+        'props': {'player_points': ['points'], 'player_rebounds': ['rebounds'],
+                  'player_assists': ['assists']},
+    },
 }
 
 PROVIDER_TITLES = {
@@ -504,9 +531,11 @@ def fetch_draftkings(sport_key, log=print):
                 for c2 in fc:
                     _ingest_category(c2)
     if cfg.get('props'):
+        _PROP_CAT_HINTS = ('player', 'props', 'batter', 'pitcher',
+                           'hitting', 'pitching', 'by player')
         for cat in cats:
             nm = str(cat.get('name', '')).lower()
-            if 'player' not in nm:
+            if not any(h in nm for h in _PROP_CAT_HINTS):
                 continue
             full, _ = _get_json(
                 f'{DK_BASE}/eventgroups/{gid}/categories/{cat.get("offerCategoryId")}',

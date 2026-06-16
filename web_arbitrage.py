@@ -123,6 +123,8 @@ GAME_MARKETS = [
     ('basketball_ncaab', 'h2h', 'NCAAB Moneyline'),
     ('icehockey_nhl', 'h2h', 'NHL Moneyline'),
     ('soccer_fifa_world_cup', 'h2h', 'World Cup Moneyline'),  # 3-way; handled by n-way devig
+    ('baseball_mlb', 'h2h', 'MLB Moneyline'),
+    ('basketball_wnba', 'h2h', 'WNBA Moneyline'),
 ]
 
 PROP_MARKETS = [
@@ -138,6 +140,15 @@ PROP_MARKETS = [
         ('player_points', 'NHL Points'),
         ('player_shots_on_goal', 'NHL Shots on Goal'),
     ], 6),
+    ('basketball_wnba', [
+        ('player_points', 'WNBA Points'),
+        ('player_rebounds', 'WNBA Rebounds'),
+        ('player_assists', 'WNBA Assists'),
+    ], 8),
+    ('baseball_mlb', [
+        ('player_strikeouts', 'MLB Pitcher Strikeouts'),
+        ('player_total_bases', 'MLB Total Bases'),
+    ], 8),
 ]
 
 BOOK_WEIGHT = {'pinnacle': 3, 'kalshi': 3, 'polymarket': 3}
@@ -330,6 +341,8 @@ def kalshi_stat_to_market(stat_str):
     elif 'assist' in s: return 'player_assists'
     elif 'three' in s or '3-pointer' in s or '3pt' in s: return 'player_threes'
     elif 'shot' in s: return 'player_shots_on_goal'
+    elif 'strikeout' in s or ' ks' in s or 'k\'s' in s: return 'player_strikeouts'
+    elif 'total base' in s or 'total bases' in s: return 'player_total_bases'
     return None
 
 def parse_kalshi_prop(market):
@@ -374,6 +387,8 @@ def parse_kalshi_prop(market):
         elif 'assist' in ctx or 'ast' in ctx: return 'player_assists'
         elif 'three' in ctx or '3pt' in ctx or '3p' in ctx: return 'player_threes'
         elif 'shot' in ctx or 'sog' in ctx: return 'player_shots_on_goal'
+        elif 'strikeout' in ctx or 'pitcher' in ctx: return 'player_strikeouts'
+        elif 'total base' in ctx or 'bases' in ctx: return 'player_total_bases'
         return None
 
     # Pattern 1: "Will [Player] score/have/record [X]+ [stat]"
@@ -507,7 +522,7 @@ def parse_kalshi_props_llm(unparsed_markets, log_fn=None):
 For each market below, output a JSON object with:
 - idx: the integer index from the market
 - player: player's full name (e.g., "LeBron James"), or null if not a player prop
-- market: one of ["player_points", "player_rebounds", "player_assists", "player_threes", "player_shots_on_goal"], or null
+- market: one of ["player_points", "player_rebounds", "player_assists", "player_threes", "player_shots_on_goal", "player_strikeouts", "player_total_bases"], or null
 - line: the threshold as a float for OVER/UNDER semantics
 
 CRITICAL line conversion rule:
@@ -858,7 +873,7 @@ def fetch_kalshi_sports(log_fn=None):
                 # Better to over-include and let regex/LLM sort it out.
                 stat_kws = ['point', 'rebound', 'assist', 'three', '3-pointer', '3pt',
                             'shot', 'goal', 'steal', 'block', 'turnover', 'sog', 'pts',
-                            'reb', 'ast']
+                            'reb', 'ast', 'strikeout', 'total base', 'pitcher']
                 has_stat = any(kw in full for kw in stat_kws)
                 has_numplus = bool(re.search(r'\d+\+', full))  # anything like "25+"
                 has_compact = bool(re.search(r':\s*\d+\+?', full))  # "Player: 25+"
@@ -1228,6 +1243,8 @@ def analyze_player_props(games_data, market_name="", kalshi_props=None, poly_pro
         elif 'rebound' in mn: market_key = 'player_rebounds'
         elif 'assist' in mn: market_key = 'player_assists'
         elif 'shot' in mn: market_key = 'player_shots_on_goal'
+        elif 'strikeout' in mn: market_key = 'player_strikeouts'
+        elif 'total base' in mn or 'total bases' in mn: market_key = 'player_total_bases'
 
     opportunities = []
     stats = {'players': 0, 'same_line': 0, 'diff_line': 0, 'too_few_books': 0}
@@ -2381,6 +2398,8 @@ def _market_name_to_api_key(market_name):
     if 'assist' in mn: return 'player_assists'
     if 'shot' in mn: return 'player_shots_on_goal'
     if 'three' in mn: return 'player_threes'
+    if 'strikeout' in mn: return 'player_strikeouts'
+    if 'total base' in mn or 'total bases' in mn: return 'player_total_bases'
     if 'moneyline' in mn or ' ml' in mn: return 'h2h'
     return None
 
