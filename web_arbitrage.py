@@ -1114,7 +1114,7 @@ def analyze_game_markets(games_data, market_name="", poly_games=None, kalshi_gam
             book_devigged[bk] = {k: clamp_prob(v / total_imp)
                                  for k, v in imps.items()}
 
-        if len(book_devigged) < 3:
+        if len(book_devigged) < 2:   # was 3; direct feeds yield 2-3 books in-season
             continue
 
         home = game.get('home_team', '')
@@ -1181,7 +1181,7 @@ def analyze_game_markets(games_data, market_name="", poly_games=None, kalshi_gam
                             'weight': w,
                         })
 
-                if len(other_fairs) < 2:
+                if len(other_fairs) < 1:   # was 2; 1 sharp counterparty (Pinnacle) is a valid +EV ref
                     continue
 
                 total_weight = sum(other_weights)
@@ -1288,7 +1288,7 @@ def analyze_player_props(games_data, market_name="", kalshi_props=None, poly_pro
 
             books_with_both = {bk: bdata for bk, bdata in books.items()
                                if 'over_odds' in bdata and 'under_odds' in bdata}
-            if len(books_with_both) < 3:
+            if len(books_with_both) < 2:   # was 3
                 stats['too_few_books'] += 1
                 continue
 
@@ -1300,7 +1300,7 @@ def analyze_player_props(games_data, market_name="", kalshi_props=None, poly_pro
                 line_groups[rounded][bk] = bdata
 
             for line_val, group_books in line_groups.items():
-                if len(group_books) < 3:
+                if len(group_books) < 2:   # was 3
                     stats['diff_line'] += 1
                     continue
                 stats['same_line'] += 1
@@ -1364,7 +1364,7 @@ def analyze_player_props(games_data, market_name="", kalshi_props=None, poly_pro
                             'vig': vig, 'weight': w,
                         })
 
-                    if len(other_over_fairs) < 2:
+                    if len(other_over_fairs) < 1:   # was 2
                         continue
 
                     total_weight = sum(other_weights)
@@ -1827,51 +1827,68 @@ def fetch_cross_exchange_opps():
 # WEATHER SCANNER (ENSEMBLE MODEL — improved)
 # ============================================================
 
+ENSEMBLE_API = "https://ensemble-api.open-meteo.com/v1/ensemble"
+
+
+def _daily_max_temps_from(daily):
+    """Pull each series' day-0 max from an Open-Meteo daily dict."""
+    temps = []
+    for key, vals in (daily or {}).items():
+        if 'temperature_2m_max' in key and isinstance(vals, list) and vals:
+            try:
+                temps.append(float(vals[0]))
+            except (ValueError, TypeError):
+                pass
+    return temps
+
+
 def _fetch_ensemble_forecast(lat, lon):
-    """Fetch multi-model ensemble forecast. Returns (mean_high, std_dev) or (None, 3.0)."""
-    try:
-        resp = requests.get(OPEN_METEO_API, params={
-            'latitude': lat, 'longitude': lon,
+    """Today's high as (mean, std_dev) from the GFS ensemble member spread.
+    Primary: ensemble endpoint (~31 members -> real sigma).
+    Fallback: standard forecast with no model list (always valid).
+    Returns (None, 3.0) only if both fail.
+
+    Note: the previous version requested model 'ecmwf_ifs04'; one invalid
+    model name makes Open-Meteo 400 the whole request, which silently
+    zeroed out every comparison."""
+    base = {'latitude': lat, 'longitude': lon,
             'daily': 'temperature_2m_max',
             'temperature_unit': 'fahrenheit',
-            'forecast_days': 3,
-            'models': 'gfs_seamless,ecmwf_ifs04,icon_seamless',
-            'timezone': 'America/New_York',
-        }, timeout=10)
+            'forecast_days': 2,
+            'timezone': 'America/New_York'}
+
+    # --- Primary: GFS ensemble members ---
+    try:
+        p = dict(base); p['models'] = 'gfs_seamless'
+        resp = requests.get(ENSEMBLE_API, params=p, timeout=12)
         if resp.status_code == 429:
             time.sleep(3)
-            resp = requests.get(OPEN_METEO_API, params={
-                'latitude': lat, 'longitude': lon,
-                'daily': 'temperature_2m_max',
-                'temperature_unit': 'fahrenheit',
-                'forecast_days': 3,
-                'models': 'gfs_seamless,ecmwf_ifs04,icon_seamless',
-                'timezone': 'America/New_York',
-            }, timeout=10)
-        if resp.status_code != 200:
-            return (None, 3.0)
-        data = resp.json()
-        daily = data.get('daily', {})
-        # Collect today's max from each model series
-        temps = []
-        for key, vals in daily.items():
-            if 'temperature_2m_max' in key and isinstance(vals, list) and vals:
-                try:
-                    v = float(vals[0])
-                    temps.append(v)
-                except (ValueError, TypeError):
-                    pass
-        if len(temps) == 0:
-            return (None, 3.0)
-        mean = sum(temps) / len(temps)
-        if len(temps) >= 2:
-            variance = sum((t - mean) ** 2 for t in temps) / len(temps)
-            std_dev = max(2.0, math.sqrt(variance))
-        else:
-            std_dev = 3.0
-        return (mean, std_dev)
+            resp = requests.get(ENSEMBLE_API, params=p, timeout=12)
+        if resp.status_code == 200:
+            temps = _daily_max_temps_from(resp.json().get('daily', {}))
+            if len(temps) >= 2:
+                mean = sum(temps) / len(temps)
+                var = sum((t - mean) ** 2 for t in temps) / len(temps)
+                return (mean, max(2.0, math.sqrt(var)))
     except Exception:
-        return (None, 3.0)
+        pass
+
+    # --- Fallback: blended best forecast, single series ---
+    try:
+        resp = requests.get(OPEN_METEO_API, params=base, timeout=12)
+        if resp.status_code == 200:
+            temps = _daily_max_temps_from(resp.json().get('daily', {}))
+            if temps:
+                mean = sum(temps) / len(temps)
+                if len(temps) >= 2:
+                    var = sum((t - mean) ** 2 for t in temps) / len(temps)
+                    std = max(2.0, math.sqrt(var))
+                else:
+                    std = 3.0   # no ensemble spread available; assume ~3°F
+                return (mean, std)
+    except Exception:
+        pass
+    return (None, 3.0)
 
 
 def fetch_weather_opps():
@@ -1926,17 +1943,31 @@ def fetch_weather_opps():
             city_info = mkt.get('_city_info', {})
             city_key = city_info.get('city', '?')
 
-            temp_match = re.search(r'(\d+(?:\.\d+)?)\s*°?(?:f|fahrenheit)?', title_low)
-            if not temp_match:
-                continue
-            threshold = float(temp_match.group(1))
-            if threshold < -20 or threshold > 140:
-                continue
+            # Kalshi temperature markets are mutually-exclusive ranges, not
+            # simple over/unders. Prefer the structured floor/cap strikes;
+            # fall back to a single regex threshold only if strikes are absent.
+            def _f(v):
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return None
+            floor_s = _f(mkt.get('floor_strike'))
+            cap_s = _f(mkt.get('cap_strike'))
 
-            is_over = any(kw in title_low for kw in ['above', 'over', 'higher', 'at least', 'exceed', 'or more', 'high'])
-            is_under = any(kw in title_low for kw in ['below', 'under', 'lower', 'at most', 'or less', 'low'])
-            if not is_over and not is_under:
-                is_over = True
+            threshold = None
+            if floor_s is None and cap_s is None:
+                temp_match = re.search(r'(\d+(?:\.\d+)?)\s*°?(?:f|fahrenheit)?', title_low)
+                if not temp_match:
+                    continue
+                threshold = float(temp_match.group(1))
+                if threshold < -20 or threshold > 140:
+                    continue
+                is_over = any(kw in title_low for kw in
+                              ['above', 'over', 'higher', 'at least', 'exceed', 'or more'])
+                is_under = any(kw in title_low for kw in
+                               ['below', 'under', 'lower', 'at most', 'or less'])
+                if not is_over and not is_under:
+                    is_over = True
 
             yb = mkt.get('yes_bid', 0) or 0
             ya = mkt.get('yes_ask', 0) or 0
@@ -1954,14 +1985,19 @@ def fetch_weather_opps():
                 if mean_high is None:
                     continue
 
-                z = (threshold - mean_high) / std_dev
                 def norm_cdf(x):
                     return 0.5 * (1 + math.erf(x / math.sqrt(2)))
 
-                if is_over:
-                    model_prob = 1.0 - norm_cdf(z)
+                # Reported daily highs are integer-rounded, so a bucket [floor, cap]
+                # captures true highs in [floor-0.5, cap+0.5).
+                if floor_s is not None or cap_s is not None:
+                    lo = norm_cdf((floor_s - 0.5 - mean_high) / std_dev) if floor_s is not None else 0.0
+                    hi = norm_cdf((cap_s + 0.5 - mean_high) / std_dev) if cap_s is not None else 1.0
+                    model_prob = max(0.0, hi - lo)
                 else:
-                    model_prob = norm_cdf(z)
+                    z = (threshold - mean_high) / std_dev
+                    model_prob = (1.0 - norm_cdf(z)) if is_over else norm_cdf(z)
+
                 if model_prob < 0.02 or model_prob > 0.98:
                     continue
 
@@ -1981,7 +2017,11 @@ def fetch_weather_opps():
 
                 opportunities.append({
                     'player': title[:60],
-                    'game': f"{city_key.upper()} · Ensemble high: {mean_high:.0f}°F ±{std_dev:.1f} · Threshold: {threshold:.0f}°F",
+                    'game': f"{city_key.upper()} · Ensemble high: {mean_high:.0f}°F ±{std_dev:.1f} · "
+                            + (f"Bucket: {floor_s:.0f}–{cap_s:.0f}°F" if (floor_s is not None and cap_s is not None)
+                               else f"≥{floor_s:.0f}°F" if floor_s is not None
+                               else f"≤{cap_s:.0f}°F" if cap_s is not None
+                               else f"Threshold: {threshold:.0f}°F"),
                     'commence': '', 'market': 'Weather',
                     'book': 'Kalshi', 'book_key': 'kalshi', 'type': 'weather',
                     'edge': round(display_edge, 1), 'gross_edge': round(display_edge, 1),
