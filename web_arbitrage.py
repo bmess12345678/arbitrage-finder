@@ -21,6 +21,10 @@ import json
 import csv
 import io
 from datetime import datetime, timedelta
+try:
+    from zoneinfo import ZoneInfo
+except Exception:                       # pragma: no cover
+    ZoneInfo = None
 from contextlib import contextmanager
 import threading
 import os
@@ -1847,6 +1851,126 @@ def _daily_max_temps_from(daily):
     return temps
 
 
+_MONTHS3 = {'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6,
+            'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12}
+
+
+def _kalshi_settlement_date(mkt, tz):
+    """Local YYYY-MM-DD a temperature market settles on.
+
+    Primary source is the event ticker (e.g. 'KXHIGHNY-26JUN18' -> 2026-06-18),
+    which is named for the local calendar day. Falls back to converting the UTC
+    close_time into the city's timezone. Returns None if neither parses, in
+    which case the market is skipped (no false signal)."""
+    et = str(mkt.get('event_ticker') or mkt.get('ticker') or '')
+    m = re.search(r'(\d{2})([A-Z]{3})(\d{2})', et.upper())
+    if m and m.group(2) in _MONTHS3:
+        try:
+            yy, mon, dd = int(m.group(1)), _MONTHS3[m.group(2)], int(m.group(3))
+            return datetime(2000 + yy, mon, dd).date().isoformat()
+        except Exception:
+            pass
+    ct = (mkt.get('close_time') or mkt.get('expiration_time')
+          or mkt.get('expected_expiration_time'))
+    if ct and ZoneInfo is not None:
+        try:
+            dt = datetime.fromisoformat(str(ct).replace('Z', '+00:00'))
+            return dt.astimezone(ZoneInfo(tz)).date().isoformat()
+        except Exception:
+            pass
+    return None
+
+
+def _today_local(tz):
+    if ZoneInfo is None:
+        return datetime.utcnow().date().isoformat()
+    try:
+        return datetime.now(ZoneInfo(tz)).date().isoformat()
+    except Exception:
+        return datetime.utcnow().date().isoformat()
+
+
+def _fetch_forecast_by_date(lat, lon, tz):
+    """{ 'YYYY-MM-DD': (mean_high, std_dev) } for the next week, from the GFS
+    ensemble member spread. std is inflated 1.3x and floored (ensembles are
+    under-dispersed). Falls back to a single blended model if the ensemble
+    call fails. Empty dict on total failure -> that city is skipped."""
+    base = {'latitude': lat, 'longitude': lon,
+            'daily': 'temperature_2m_max',
+            'temperature_unit': 'fahrenheit',
+            'forecast_days': 7,
+            'timezone': tz}
+    out = {}
+
+    def _ingest(daily, ensemble):
+        dates = daily.get('time') or []
+        series = [v for k, v in daily.items()
+                  if 'temperature_2m_max' in k and isinstance(v, list)]
+        for i, d in enumerate(dates):
+            vals = []
+            for s in series:
+                if i < len(s) and s[i] is not None:
+                    try:
+                        vals.append(float(s[i]))
+                    except (ValueError, TypeError):
+                        pass
+            if not vals:
+                continue
+            mean = sum(vals) / len(vals)
+            if ensemble and len(vals) >= 2:
+                var = sum((t - mean) ** 2 for t in vals) / len(vals)
+                std = max(3.0, math.sqrt(var) * 1.3)
+            else:
+                std = 4.0
+            out[d] = (mean, std)
+
+    try:
+        p = dict(base); p['models'] = 'gfs_seamless'
+        r = requests.get(ENSEMBLE_API, params=p, timeout=12)
+        if r.status_code == 429:
+            time.sleep(3)
+            r = requests.get(ENSEMBLE_API, params=p, timeout=12)
+        if r.status_code == 200:
+            _ingest(r.json().get('daily', {}), ensemble=True)
+    except Exception:
+        pass
+    if not out:
+        try:
+            r = requests.get(OPEN_METEO_API, params=base, timeout=12)
+            if r.status_code == 200:
+                _ingest(r.json().get('daily', {}), ensemble=False)
+        except Exception:
+            pass
+    return out
+
+
+def _f0(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _temp_bucket_prob(floor_s, cap_s, mean, std):
+    """P(daily high falls in a Kalshi temperature market) under N(mean, std).
+
+    Convention confirmed from live data: interior buckets carry BOTH strikes
+    and are inclusive [floor, cap]; 'X or above' carries only floor and is
+    strictly greater (high > floor); 'X or below' carries only cap and is
+    strictly less (high < cap). Reported highs are integers, so boundaries sit
+    at the half-degree."""
+    def ncdf(x):
+        return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+    if floor_s is not None and cap_s is not None:
+        return max(0.0, ncdf((cap_s + 0.5 - mean) / std)
+                   - ncdf((floor_s - 0.5 - mean) / std))
+    if floor_s is not None:
+        return max(0.0, 1.0 - ncdf((floor_s + 0.5 - mean) / std))
+    if cap_s is not None:
+        return max(0.0, ncdf((cap_s - 0.5 - mean) / std))
+    return None
+
+
 def _fetch_ensemble_forecast(lat, lon):
     """Today's high as (mean, std_dev) from the GFS ensemble member spread.
     Primary: ensemble endpoint (~31 members -> real sigma).
@@ -1903,11 +2027,11 @@ def fetch_weather_opps():
     opportunities = []
     try:
         WEATHER_SERIES = {
-            'KXHIGHNY':  {'city': 'NYC',     'lat': 40.78, 'lon': -73.97},
-            'KXHIGHCHI': {'city': 'Chicago', 'lat': 41.88, 'lon': -87.63},
-            'KXHIGHMIA': {'city': 'Miami',   'lat': 25.76, 'lon': -80.19},
-            'KXHIGHLAX': {'city': 'LA',      'lat': 34.05, 'lon': -118.24},
-            'KXHIGHDEN': {'city': 'Denver',  'lat': 39.74, 'lon': -104.98},
+            'KXHIGHNY':  {'city': 'NYC',     'lat': 40.78, 'lon': -73.97,  'tz': 'America/New_York'},
+            'KXHIGHCHI': {'city': 'Chicago', 'lat': 41.88, 'lon': -87.63,  'tz': 'America/Chicago'},
+            'KXHIGHMIA': {'city': 'Miami',   'lat': 25.76, 'lon': -80.19,  'tz': 'America/New_York'},
+            'KXHIGHLAX': {'city': 'LA',      'lat': 34.05, 'lon': -118.24, 'tz': 'America/Los_Angeles'},
+            'KXHIGHDEN': {'city': 'Denver',  'lat': 39.74, 'lon': -104.98, 'tz': 'America/Denver'},
         }
         weather_mkts = []
         log_debug("  Fetching Kalshi weather series...")
@@ -1942,18 +2066,34 @@ def fetch_weather_opps():
         if not weather_mkts:
             return []
 
-        forecast_cache = {}
+        # One ensemble forecast per city, keyed by local date. We target FUTURE
+        # days only: today's high is already partly realized and Kalshi prices
+        # it off live temperatures the morning forecast can't see, so same-day
+        # comparisons are the model being stale, not real edge.
+        forecast_by_city, today_by_city = {}, {}
+        for _stkr, _info in WEATHER_SERIES.items():
+            c = _info['city']
+            if c in forecast_by_city:
+                continue
+            time.sleep(0.4)
+            forecast_by_city[c] = _fetch_forecast_by_date(_info['lat'], _info['lon'], _info['tz'])
+            today_by_city[c] = _today_local(_info['tz'])
+            fc = forecast_by_city[c]
+            future = sorted(d for d in fc if d > today_by_city[c]) if fc else []
+            if future:
+                mh, sd = fc[future[0]]
+                log_debug(f"    {c} forecast {future[0]}: {mh:.1f}°F ±{sd:.1f}")
+            else:
+                log_debug(f"    {c}: no usable forecast")
+
         matched_count = 0
+        skipped_today = 0
 
         for mkt in weather_mkts:
-            title = (mkt.get('title', '') or '')
-            title_low = title.lower()
             city_info = mkt.get('_city_info', {})
             city_key = city_info.get('city', '?')
+            tz = city_info.get('tz', 'America/New_York')
 
-            # Kalshi temperature markets are mutually-exclusive ranges, not
-            # simple over/unders. Prefer the structured floor/cap strikes;
-            # fall back to a single regex threshold only if strikes are absent.
             def _f(v):
                 try:
                     return float(v)
@@ -1961,52 +2101,30 @@ def fetch_weather_opps():
                     return None
             floor_s = _f(mkt.get('floor_strike'))
             cap_s = _f(mkt.get('cap_strike'))
-
             threshold = None
             if floor_s is None and cap_s is None:
-                temp_match = re.search(r'(\d+(?:\.\d+)?)\s*°?(?:f|fahrenheit)?', title_low)
-                if not temp_match:
-                    continue
-                threshold = float(temp_match.group(1))
-                if threshold < -20 or threshold > 140:
-                    continue
-                is_over = any(kw in title_low for kw in
-                              ['above', 'over', 'higher', 'at least', 'exceed', 'or more'])
-                is_under = any(kw in title_low for kw in
-                               ['below', 'under', 'lower', 'at most', 'or less'])
-                if not is_over and not is_under:
-                    is_over = True
+                continue   # need structured strikes; no fragile title parsing
+
+            # Match each market to the forecast for ITS settlement date and skip
+            # anything settling today or earlier.
+            settle = _kalshi_settlement_date(mkt, tz)
+            if settle is None:
+                continue
+            if settle <= today_by_city.get(city_key, ''):
+                skipped_today += 1
+                continue
+            fc = forecast_by_city.get(city_key) or {}
+            if settle not in fc:
+                continue
+            mean_high, std_dev = fc[settle]
 
             yb = mkt.get('yes_bid', 0) or 0
             ya = mkt.get('yes_ask', 0) or 0
             k_mid = ((yb + ya) / 2 if yb > 0 and ya > 0 else yb or ya) / 100.0
 
             try:
-                if city_key not in forecast_cache:
-                    time.sleep(0.5)
-                    mean_high, std_dev = _fetch_ensemble_forecast(city_info['lat'], city_info['lon'])
-                    forecast_cache[city_key] = (mean_high, std_dev)
-                    if mean_high is not None:
-                        log_debug(f"    {city_key} ensemble: {mean_high:.1f}°F ±{std_dev:.1f}")
-
-                mean_high, std_dev = forecast_cache[city_key]
-                if mean_high is None:
-                    continue
-
-                def norm_cdf(x):
-                    return 0.5 * (1 + math.erf(x / math.sqrt(2)))
-
-                # Reported daily highs are integer-rounded, so a bucket [floor, cap]
-                # captures true highs in [floor-0.5, cap+0.5).
-                if floor_s is not None or cap_s is not None:
-                    lo = norm_cdf((floor_s - 0.5 - mean_high) / std_dev) if floor_s is not None else 0.0
-                    hi = norm_cdf((cap_s + 0.5 - mean_high) / std_dev) if cap_s is not None else 1.0
-                    model_prob = max(0.0, hi - lo)
-                else:
-                    z = (threshold - mean_high) / std_dev
-                    model_prob = (1.0 - norm_cdf(z)) if is_over else norm_cdf(z)
-
-                if model_prob < 0.02 or model_prob > 0.98:
+                model_prob = _temp_bucket_prob(floor_s, cap_s, mean_high, std_dev)
+                if model_prob is None or model_prob < 0.02 or model_prob > 0.98:
                     continue
 
                 # Spread-aware edge: you pay the ASK to buy YES, or (100-BID)
@@ -2028,23 +2146,29 @@ def fetch_weather_opps():
                 if display_edge < 3:
                     continue
 
-                # Plain-English description of what the contract pays on
-                if floor_s is not None and cap_s is not None:
-                    bucket_desc = f"high is {floor_s:.0f}\u2013{cap_s:.0f}\u00b0F"
+                # Plain-English label, straight from Kalshi when present
+                sub = (mkt.get('yes_sub_title') or mkt.get('subtitle') or '').strip()
+                if sub:
+                    bucket_desc = f"high {sub}"
+                elif floor_s is not None and cap_s is not None:
+                    bucket_desc = f"high {floor_s:.0f}\u2013{cap_s:.0f}\u00b0F"
                 elif floor_s is not None:
-                    bucket_desc = f"high is {floor_s:.0f}\u00b0F or hotter"
-                elif cap_s is not None:
-                    bucket_desc = f"high is {cap_s:.0f}\u00b0F or cooler"
+                    bucket_desc = f"high over {floor_s:.0f}\u00b0F"
                 else:
-                    bucket_desc = f"high is about {threshold:.0f}\u00b0F"
+                    bucket_desc = f"high under {cap_s:.0f}\u00b0F"
+                try:
+                    _dt = datetime.fromisoformat(settle)
+                    day_lbl = f"{_dt.strftime('%b')} {_dt.day}"
+                except Exception:
+                    day_lbl = settle
 
                 model_prob, k_mid = side_prob, side_price   # downstream fields use the chosen side
                 price_c = round(side_price * 100)
 
                 opportunities.append({
-                    'player': f"{city_key.upper()}: {bucket_desc} today",
-                    'game': f"Forecast high {mean_high:.0f}\u00b0F \u00b1{std_dev:.0f}\u00b0 (GFS ensemble) \u00b7 "
-                            f"contract pays if {bucket_desc}",
+                    'player': f"{city_key.upper()}: {bucket_desc} ({day_lbl})",
+                    'game': f"{day_lbl} forecast high {mean_high:.0f}\u00b0F \u00b1{std_dev:.0f}\u00b0 (GFS ensemble) \u00b7 "
+                            f"pays if {bucket_desc}",
                     'commence': '', 'market': 'Weather (Kalshi)',
                     'book': 'Kalshi', 'book_key': 'kalshi', 'type': 'weather',
                     'edge': round(display_edge, 1), 'gross_edge': round(display_edge, 1),
@@ -2063,7 +2187,8 @@ def fetch_weather_opps():
                 })
             except Exception:
                 continue
-        log_debug(f"  Weather: {matched_count} compared, {len(opportunities)} with 3%+ edge")
+        log_debug(f"  Weather: {matched_count} compared, {len(opportunities)} edges \u2265 3% "
+                  f"({skipped_today} same-day/past skipped)")
     except Exception as e:
         log_debug(f"  Weather error: {e}")
     return opportunities
@@ -2711,30 +2836,37 @@ def debug_odds():
 
     # ---- weather sample: one city, every bucket, model vs market ----
     try:
+        tz = 'America/New_York'
         w("\n\n=== WEATHER SAMPLE: NYC (KXHIGHNY) ===")
-        mean_high, std_dev = _fetch_ensemble_forecast(40.78, -73.97)
-        if mean_high is None:
-            w("  MODEL FORECAST FAILED (no ensemble data)")
+        fc = _fetch_forecast_by_date(40.78, -73.97, tz)
+        today = _today_local(tz)
+        w(f"  today (local): {today}")
+        if not fc:
+            w("  MODEL FORECAST FAILED (no data)")
         else:
-            w(f"  Model high: {mean_high:.1f}°F  spread ±{std_dev:.1f}°")
+            for d in sorted(fc)[:5]:
+                mh, sd = fc[d]
+                tag = ' <- today (skipped)' if d <= today else ''
+                w(f"  forecast {d}: {mh:.1f}\u00b0F \u00b1{sd:.1f}{tag}")
         resp = kalshi_get(f"{KALSHI_API}/markets",
                           params={'series_ticker': 'KXHIGHNY',
-                                  'status': 'open', 'limit': 12}, timeout=10)
+                                  'status': 'open', 'limit': 25}, timeout=10)
         if resp.status_code == 200:
-            def ncdf(x):
-                return 0.5 * (1 + math.erf(x / math.sqrt(2)))
-            w(f"  {'bucket':<16}{'floor':>6}{'cap':>6}{'bid¢':>6}{'ask¢':>6}{'model':>8}")
-            for m in resp.json().get('markets', [])[:12]:
+            w(f"\n  {'bucket':<16}{'settle':>12}{'fl':>5}{'cap':>5}{'bid':>5}{'ask':>5}{'model':>8}{'used':>6}")
+            for m in resp.json().get('markets', [])[:25]:
                 yb, ya, _lp = kalshi_prices(m)
                 fl = m.get('floor_strike')
                 cp = m.get('cap_strike')
-                mp = '—'
-                if mean_high is not None and (fl is not None or cp is not None):
-                    lo = ncdf((float(fl) - 0.5 - mean_high) / std_dev) if fl is not None else 0.0
-                    hi = ncdf((float(cp) + 0.5 - mean_high) / std_dev) if cp is not None else 1.0
-                    mp = f"{max(0.0, hi - lo) * 100:.0f}%"
+                settle = _kalshi_settlement_date(m, tz)
+                used, mp = 'no', '\u2014'
+                if settle and settle > today and fc.get(settle) and (fl is not None or cp is not None):
+                    mh, sd = fc[settle]
+                    p = _temp_bucket_prob(_f0(fl), _f0(cp), mh, sd)
+                    if p is not None:
+                        mp = f"{p*100:.0f}%"
+                        used = 'YES'
                 sub = (m.get('yes_sub_title') or m.get('subtitle') or '?')[:15]
-                w(f"  {sub:<16}{str(fl):>6}{str(cp):>6}{str(yb):>6}{str(ya):>6}{mp:>8}")
+                w(f"  {sub:<16}{str(settle):>12}{str(fl):>5}{str(cp):>5}{str(yb):>5}{str(ya):>5}{mp:>8}{used:>6}")
         else:
             w(f"  Kalshi returned HTTP {resp.status_code}")
     except Exception as e:
