@@ -227,15 +227,24 @@ def _full_toks(name, soccer=False):
     return frozenset(t for t in s.split() if t)
 
 
+_QUALIFIER_TOKS = {'corners', 'corner', 'bookings', 'booking', 'cards', 'card',
+                   'shots', 'shot', 'fouls', 'foul', 'offsides', 'offside',
+                   'throwins', 'throws', 'goalkicks', 'tackles', 'saves'}
+
+
 def _sides_match(toks_a, key_a, toks_b, key_b):
     """True if two team references plausibly denote the same team.
 
     Exact key match, or one full-name token set contains the other
     (handles 'Oklahoma City' vs 'Oklahoma City Thunder',
-    'Indiana' vs 'Indiana Pacers')."""
+    'Indiana' vs 'Indiana Pacers'). But if the only difference is a
+    market-qualifier word (e.g. 'Portugal' vs 'Portugal Corners'), the two
+    are NOT the same market and must not merge."""
     if key_a == key_b:
         return True
     if toks_a and toks_b and (toks_a <= toks_b or toks_b <= toks_a):
+        if (toks_a ^ toks_b) & _QUALIFIER_TOKS:
+            return False
         return True
     return False
 
@@ -355,6 +364,13 @@ def fetch_pinnacle(sport_key, log=print):
             away = next((p.get('name') for p in parts
                          if p.get('alignment') == 'away'), None)
             if not home or not away:
+                continue
+            # Skip derivative markets (corners, bookings, cards, shots, …).
+            # Pinnacle returns them as matchups whose participant names carry a
+            # parenthetical qualifier, e.g. "Australia (Corners)" or
+            # "Portugal (Bookings)". Real team names never contain parentheses,
+            # so this cleanly drops them before they pollute the moneyline.
+            if '(' in home or '(' in away:
                 continue
             by_id[mid] = _mk_game(home, away, _parse_ts(m.get('startTime')))
 
