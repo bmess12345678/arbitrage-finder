@@ -2653,6 +2653,89 @@ def feed_status():
     return jsonify({'direct_feeds': providers.ENABLED,
                     'snapshots': providers.status()})
 
+
+@app.route('/api/debug-odds')
+def debug_odds():
+    """Plain-text dump of exactly what each book returns for one sport, the
+    merged result, and a weather sample. Use this to see the real data when
+    odds look wrong. Hit in a browser:
+        /api/debug-odds?key=YOUR_SCAN_KEY&sport=soccer_fifa_world_cup
+    """
+    auth_err = _auth_check()
+    if auth_err:
+        return auth_err
+    sport = request.args.get('sport', 'soccer_fifa_world_cup')
+    out = []
+    def w(s=''):
+        out.append(s)
+
+    # ---- raw odds, per book, straight from each provider ----
+    try:
+        if sport not in providers.SPORTS:
+            return Response(f"unknown sport '{sport}'. valid: "
+                            f"{list(providers.SPORTS)}\n", mimetype='text/plain')
+        w(f"=== RAW PER-BOOK ODDS: {sport} ===")
+        per_book = {}
+        for name, fn in providers.PROVIDERS:
+            try:
+                games = fn(sport, log=lambda *a: None) or []
+            except Exception as e:
+                w(f"\n[{name}] ERROR: {type(e).__name__}: {e}")
+                continue
+            per_book[name] = games
+            w(f"\n[{name}] {len(games)} games")
+            for g in games[:5]:
+                w(f"  {g.get('away')}  @  {g.get('home')}")
+                for nm, price in g.get('h2h', []):
+                    w(f"        {str(nm):<26} {format_american(price)}")
+
+        merged = providers._merge_to_v4(sport, per_book, log=lambda *a: None)
+        w(f"\n=== MERGED ({len(merged)} games) — what the scanner compares ===")
+        for game in merged[:6]:
+            w(f"\n  {game.get('away_team')}  @  {game.get('home_team')}")
+            for bm in game.get('bookmakers', []):
+                h2h = next((m for m in bm.get('markets', [])
+                            if m.get('key') == 'h2h'), None)
+                if h2h:
+                    s = "   ".join(f"{o['name']}={format_american(o['price'])}"
+                                   for o in h2h['outcomes'])
+                    w(f"        {bm['key']:<11} {s}")
+    except Exception as e:
+        w(f"\nODDS DUMP ERROR: {type(e).__name__}: {e}")
+
+    # ---- weather sample: one city, every bucket, model vs market ----
+    try:
+        w("\n\n=== WEATHER SAMPLE: NYC (KXHIGHNY) ===")
+        mean_high, std_dev = _fetch_ensemble_forecast(40.78, -73.97)
+        if mean_high is None:
+            w("  MODEL FORECAST FAILED (no ensemble data)")
+        else:
+            w(f"  Model high: {mean_high:.1f}°F  spread ±{std_dev:.1f}°")
+        resp = kalshi_get(f"{KALSHI_API}/markets",
+                          params={'series_ticker': 'KXHIGHNY',
+                                  'status': 'open', 'limit': 12}, timeout=10)
+        if resp.status_code == 200:
+            def ncdf(x):
+                return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+            w(f"  {'bucket':<16}{'floor':>6}{'cap':>6}{'bid¢':>6}{'ask¢':>6}{'model':>8}")
+            for m in resp.json().get('markets', [])[:12]:
+                yb, ya, _lp = kalshi_prices(m)
+                fl = m.get('floor_strike')
+                cp = m.get('cap_strike')
+                mp = '—'
+                if mean_high is not None and (fl is not None or cp is not None):
+                    lo = ncdf((float(fl) - 0.5 - mean_high) / std_dev) if fl is not None else 0.0
+                    hi = ncdf((float(cp) + 0.5 - mean_high) / std_dev) if cp is not None else 1.0
+                    mp = f"{max(0.0, hi - lo) * 100:.0f}%"
+                sub = (m.get('yes_sub_title') or m.get('subtitle') or '?')[:15]
+                w(f"  {sub:<16}{str(fl):>6}{str(cp):>6}{str(yb):>6}{str(ya):>6}{mp:>8}")
+        else:
+            w(f"  Kalshi returned HTTP {resp.status_code}")
+    except Exception as e:
+        w(f"\nWEATHER DUMP ERROR: {type(e).__name__}: {e}")
+
+    return Response("\n".join(out) + "\n", mimetype='text/plain')
+
 @app.route('/api/opportunities')
 def get_opportunities():
     warnings = []
