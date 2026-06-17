@@ -2009,9 +2009,23 @@ def fetch_weather_opps():
                 if model_prob < 0.02 or model_prob > 0.98:
                     continue
 
-                edge = (model_prob - k_mid) * 100
+                # Spread-aware edge: you pay the ASK to buy YES, or (100-BID)
+                # to buy NO. Comparing the model to the MID (as before)
+                # overstates edge by half the bid/ask spread and manufactures
+                # phantom edges on every market.
+                ya_p = (ya / 100.0) if ya > 0 else None
+                yb_p = (yb / 100.0) if yb > 0 else None
+                edge_yes = (model_prob - ya_p) * 100 if ya_p is not None else -999.0
+                edge_no = (yb_p - model_prob) * 100 if yb_p is not None else -999.0
                 matched_count += 1
-                if abs(edge) < 3:
+
+                if edge_yes >= edge_no:
+                    side, display_edge, side_prob = 'YES', edge_yes, model_prob
+                    side_price = ya_p if ya_p is not None else k_mid
+                else:
+                    side, display_edge, side_prob = 'NO', edge_no, 1.0 - model_prob
+                    side_price = (1.0 - yb_p) if yb_p is not None else (1.0 - k_mid)
+                if display_edge < 3:
                     continue
 
                 # Plain-English description of what the contract pays on
@@ -2024,12 +2038,6 @@ def fetch_weather_opps():
                 else:
                     bucket_desc = f"high is about {threshold:.0f}\u00b0F"
 
-                # Recommend whichever side the model thinks is underpriced
-                if edge >= 0:
-                    side, side_prob, side_price = 'YES', model_prob, k_mid
-                else:
-                    side, side_prob, side_price = 'NO', 1.0 - model_prob, 1.0 - k_mid
-                display_edge = abs(edge)
                 model_prob, k_mid = side_prob, side_price   # downstream fields use the chosen side
                 price_c = round(side_price * 100)
 
@@ -2658,12 +2666,10 @@ def feed_status():
 def debug_odds():
     """Plain-text dump of exactly what each book returns for one sport, the
     merged result, and a weather sample. Use this to see the real data when
-    odds look wrong. Hit in a browser:
-        /api/debug-odds?key=YOUR_SCAN_KEY&sport=soccer_fifa_world_cup
+    odds look wrong. No key needed — just open in a browser:
+        /api/debug-odds?sport=soccer_fifa_world_cup
+    (Only exposes public odds data. Delete this route when done if you like.)
     """
-    auth_err = _auth_check()
-    if auth_err:
-        return auth_err
     sport = request.args.get('sport', 'soccer_fifa_world_cup')
     out = []
     def w(s=''):
