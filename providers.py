@@ -172,17 +172,22 @@ def _dec_to_american(dec):
 
 
 def _norm_price(p):
-    """Pinnacle/DK give american ints; tolerate decimal slipping through."""
+    """Accept either decimal or American odds from any book.
+
+    American odds are by definition always >= +100 or <= -100, so any value
+    strictly inside (-100, +100) that is > 1.0 must be decimal. The previous
+    version assumed American and silently dropped whole-number decimals (2.0,
+    4.0) and treated longshot decimals (>=11.0) as invalid American — which is
+    why Pinnacle draws and underdogs came through wrong or missing."""
     try:
         p = float(p)
     except Exception:
         return None
-    if 1.0 < p < 11.0 and abs(p - round(p)) > 1e-9:   # looks decimal (e.g. 1.91)
-        return _dec_to_american(p)
-    p = int(round(p))
-    if -99 < p < 100:
-        return None
-    return p
+    if p >= 100 or p <= -100:
+        return int(round(p))            # American (-110, +250, ...)
+    if p > 1.0:
+        return _dec_to_american(p)      # decimal (1.91, 2.0, 4.0, 13.0, ...)
+    return None                          # <= 1.0 is not a valid price
 
 
 # ============================================================
