@@ -1891,21 +1891,22 @@ def _today_local(tz):
 
 
 def _fetch_forecast_by_date(lat, lon, tz):
-    """{ 'YYYY-MM-DD': (mean_high, std_dev) } for the next week, from the GFS
-    ensemble member spread. std is inflated 1.3x and floored (ensembles are
-    under-dispersed). Falls back to a single blended model if the ensemble
-    call fails. Empty dict on total failure -> that city is skipped."""
+    """{ 'YYYY-MM-DD': {'high': (mean,std), 'low': (mean,std)} } for the next
+    week, from the GFS ensemble member spread. std is inflated 1.3x and floored
+    (ensembles are under-dispersed). Falls back to a single blended model if the
+    ensemble call fails. Empty dict on total failure -> that city is skipped."""
     base = {'latitude': lat, 'longitude': lon,
-            'daily': 'temperature_2m_max',
+            'daily': 'temperature_2m_max,temperature_2m_min',
             'temperature_unit': 'fahrenheit',
             'forecast_days': 7,
             'timezone': tz}
     out = {}
 
-    def _ingest(daily, ensemble):
+    def _agg(daily, key, ensemble):
         dates = daily.get('time') or []
         series = [v for k, v in daily.items()
-                  if 'temperature_2m_max' in k and isinstance(v, list)]
+                  if k.startswith(key) and isinstance(v, list)]
+        res = {}
         for i, d in enumerate(dates):
             vals = []
             for s in series:
@@ -1922,7 +1923,14 @@ def _fetch_forecast_by_date(lat, lon, tz):
                 std = max(3.0, math.sqrt(var) * 1.3)
             else:
                 std = 4.0
-            out[d] = (mean, std)
+            res[d] = (mean, std)
+        return res
+
+    def _ingest(daily, ensemble):
+        highs = _agg(daily, 'temperature_2m_max', ensemble)
+        lows = _agg(daily, 'temperature_2m_min', ensemble)
+        for d in set(highs) | set(lows):
+            out[d] = {'high': highs.get(d), 'low': lows.get(d)}
 
     try:
         p = dict(base); p['models'] = 'gfs_seamless'
@@ -2027,11 +2035,16 @@ def fetch_weather_opps():
     opportunities = []
     try:
         WEATHER_SERIES = {
-            'KXHIGHNY':  {'city': 'NYC',     'lat': 40.78, 'lon': -73.97,  'tz': 'America/New_York'},
-            'KXHIGHCHI': {'city': 'Chicago', 'lat': 41.88, 'lon': -87.63,  'tz': 'America/Chicago'},
-            'KXHIGHMIA': {'city': 'Miami',   'lat': 25.76, 'lon': -80.19,  'tz': 'America/New_York'},
-            'KXHIGHLAX': {'city': 'LA',      'lat': 34.05, 'lon': -118.24, 'tz': 'America/Los_Angeles'},
-            'KXHIGHDEN': {'city': 'Denver',  'lat': 39.74, 'lon': -104.98, 'tz': 'America/Denver'},
+            'KXHIGHNY':  {'city': 'NYC',     'lat': 40.78, 'lon': -73.97,  'tz': 'America/New_York',    'kind': 'high'},
+            'KXHIGHCHI': {'city': 'Chicago', 'lat': 41.88, 'lon': -87.63,  'tz': 'America/Chicago',     'kind': 'high'},
+            'KXHIGHMIA': {'city': 'Miami',   'lat': 25.76, 'lon': -80.19,  'tz': 'America/New_York',    'kind': 'high'},
+            'KXHIGHLAX': {'city': 'LA',      'lat': 34.05, 'lon': -118.24, 'tz': 'America/Los_Angeles', 'kind': 'high'},
+            'KXHIGHDEN': {'city': 'Denver',  'lat': 39.74, 'lon': -104.98, 'tz': 'America/Denver',      'kind': 'high'},
+            'KXLOWNY':   {'city': 'NYC',     'lat': 40.78, 'lon': -73.97,  'tz': 'America/New_York',    'kind': 'low'},
+            'KXLOWCHI':  {'city': 'Chicago', 'lat': 41.88, 'lon': -87.63,  'tz': 'America/Chicago',     'kind': 'low'},
+            'KXLOWMIA':  {'city': 'Miami',   'lat': 25.76, 'lon': -80.19,  'tz': 'America/New_York',    'kind': 'low'},
+            'KXLOWLAX':  {'city': 'LA',      'lat': 34.05, 'lon': -118.24, 'tz': 'America/Los_Angeles', 'kind': 'low'},
+            'KXLOWDEN':  {'city': 'Denver',  'lat': 39.74, 'lon': -104.98, 'tz': 'America/Denver',      'kind': 'low'},
         }
         weather_mkts = []
         log_debug("  Fetching Kalshi weather series...")
@@ -2080,9 +2093,11 @@ def fetch_weather_opps():
             today_by_city[c] = _today_local(_info['tz'])
             fc = forecast_by_city[c]
             future = sorted(d for d in fc if d > today_by_city[c]) if fc else []
-            if future:
-                mh, sd = fc[future[0]]
-                log_debug(f"    {c} forecast {future[0]}: {mh:.1f}°F ±{sd:.1f}")
+            if future and fc[future[0]].get('high'):
+                mh, sd = fc[future[0]]['high']
+                lo = fc[future[0]].get('low')
+                lo_s = f", low {lo[0]:.0f}\u00b0" if lo else ""
+                log_debug(f"    {c} forecast {future[0]}: high {mh:.1f}\u00b0F \u00b1{sd:.1f}{lo_s}")
             else:
                 log_debug(f"    {c}: no usable forecast")
 
@@ -2116,7 +2131,11 @@ def fetch_weather_opps():
             fc = forecast_by_city.get(city_key) or {}
             if settle not in fc:
                 continue
-            mean_high, std_dev = fc[settle]
+            kind = city_info.get('kind', 'high')
+            band = fc[settle].get(kind)
+            if not band:
+                continue
+            mean_high, std_dev = band   # mean_high holds whichever band (high or low)
 
             yb = mkt.get('yes_bid', 0) or 0
             ya = mkt.get('yes_ask', 0) or 0
@@ -2147,15 +2166,16 @@ def fetch_weather_opps():
                     continue
 
                 # Plain-English label, straight from Kalshi when present
+                band_word = 'low' if kind == 'low' else 'high'
                 sub = (mkt.get('yes_sub_title') or mkt.get('subtitle') or '').strip()
                 if sub:
-                    bucket_desc = f"high {sub}"
+                    bucket_desc = f"{band_word} {sub}"
                 elif floor_s is not None and cap_s is not None:
-                    bucket_desc = f"high {floor_s:.0f}\u2013{cap_s:.0f}\u00b0F"
+                    bucket_desc = f"{band_word} {floor_s:.0f}\u2013{cap_s:.0f}\u00b0F"
                 elif floor_s is not None:
-                    bucket_desc = f"high over {floor_s:.0f}\u00b0F"
+                    bucket_desc = f"{band_word} over {floor_s:.0f}\u00b0F"
                 else:
-                    bucket_desc = f"high under {cap_s:.0f}\u00b0F"
+                    bucket_desc = f"{band_word} under {cap_s:.0f}\u00b0F"
                 try:
                     _dt = datetime.fromisoformat(settle)
                     day_lbl = f"{_dt.strftime('%b')} {_dt.day}"
@@ -2167,7 +2187,7 @@ def fetch_weather_opps():
 
                 opportunities.append({
                     'player': f"{city_key.upper()}: {bucket_desc} ({day_lbl})",
-                    'game': f"{day_lbl} forecast high {mean_high:.0f}\u00b0F \u00b1{std_dev:.0f}\u00b0 (GFS ensemble) \u00b7 "
+                    'game': f"{day_lbl} forecast {band_word} {mean_high:.0f}\u00b0F \u00b1{std_dev:.0f}\u00b0 (GFS ensemble) \u00b7 "
                             f"pays if {bucket_desc}",
                     'commence': '', 'market': 'Weather (Kalshi)',
                     'book': 'Kalshi', 'book_key': 'kalshi', 'type': 'weather',
@@ -2845,9 +2865,12 @@ def debug_odds():
             w("  MODEL FORECAST FAILED (no data)")
         else:
             for d in sorted(fc)[:5]:
-                mh, sd = fc[d]
+                hi = fc[d].get('high')
+                lo = fc[d].get('low')
                 tag = ' <- today (skipped)' if d <= today else ''
-                w(f"  forecast {d}: {mh:.1f}\u00b0F \u00b1{sd:.1f}{tag}")
+                hs = f"high {hi[0]:.1f}\u00b1{hi[1]:.1f}" if hi else "high n/a"
+                ls = f"low {lo[0]:.1f}\u00b1{lo[1]:.1f}" if lo else "low n/a"
+                w(f"  forecast {d}: {hs}  {ls}{tag}")
         resp = kalshi_get(f"{KALSHI_API}/markets",
                           params={'series_ticker': 'KXHIGHNY',
                                   'status': 'open', 'limit': 25}, timeout=10)
@@ -2859,8 +2882,9 @@ def debug_odds():
                 cp = m.get('cap_strike')
                 settle = _kalshi_settlement_date(m, tz)
                 used, mp = 'no', '\u2014'
-                if settle and settle > today and fc.get(settle) and (fl is not None or cp is not None):
-                    mh, sd = fc[settle]
+                band = fc.get(settle, {}).get('high') if settle else None
+                if settle and settle > today and band and (fl is not None or cp is not None):
+                    mh, sd = band
                     p = _temp_bucket_prob(_f0(fl), _f0(cp), mh, sd)
                     if p is not None:
                         mp = f"{p*100:.0f}%"
@@ -2872,6 +2896,110 @@ def debug_odds():
     except Exception as e:
         w(f"\nWEATHER DUMP ERROR: {type(e).__name__}: {e}")
 
+    return Response("\n".join(out) + "\n", mimetype='text/plain')
+
+
+@app.route('/api/weather-backtest')
+def weather_backtest():
+    """Measure the forecast's systematic bias and true error spread per city —
+    the numbers needed to calibrate (or distrust) the weather model.
+
+        /api/weather-backtest?city=NYC&days=120     (or city=ALL)
+
+    Compares Open-Meteo's ARCHIVED FORECAST against ERA5 reanalysis 'actuals'
+    for daily high and low. NOTE: ERA5 is a gridded reanalysis — a close proxy
+    for the station, NOT the exact NWS Climate Report value Kalshi settles on,
+    so treat the bias as approximate. For exact calibration, substitute NOAA
+    CLI station observations as 'actual'."""
+    CITIES = {
+        'NYC':     (40.78, -73.97, 'America/New_York'),
+        'CHICAGO': (41.88, -87.63, 'America/Chicago'),
+        'MIAMI':   (25.76, -80.19, 'America/New_York'),
+        'LA':      (34.05, -118.24, 'America/Los_Angeles'),
+        'DENVER':  (39.74, -104.98, 'America/Denver'),
+    }
+    sel = request.args.get('city', 'NYC').upper()
+    try:
+        days = max(14, min(int(request.args.get('days', 120)), 365))
+    except Exception:
+        days = 120
+    targets = list(CITIES) if sel == 'ALL' else [sel]
+    out = []
+    def w(s=''):
+        out.append(s)
+    if sel != 'ALL' and sel not in CITIES:
+        return Response(f"unknown city '{sel}'. valid: {list(CITIES)} or ALL\n",
+                        mimetype='text/plain')
+
+    end = datetime.utcnow().date() - timedelta(days=6)   # ERA5 lags ~5 days
+    start = end - timedelta(days=days)
+    w("=== WEATHER FORECAST BACKTEST ===")
+    w(f"  window: {start} .. {end} ({days} days)")
+    w("  predicted = Open-Meteo archived forecast | actual = ERA5 reanalysis")
+    w("  (ERA5 approximates the station, not the exact NWS CLI value)")
+
+    def _fetch(url, lat, lon, tz):
+        try:
+            r = requests.get(url, params={
+                'latitude': lat, 'longitude': lon,
+                'start_date': start.isoformat(), 'end_date': end.isoformat(),
+                'daily': 'temperature_2m_max,temperature_2m_min',
+                'temperature_unit': 'fahrenheit', 'timezone': tz}, timeout=40)
+            if r.status_code != 200:
+                return None, f"HTTP {r.status_code}"
+            return r.json().get('daily', {}), None
+        except Exception as e:
+            return None, f"{type(e).__name__}: {e}"
+
+    def _stats(pred, act, field):
+        pi = {d: i for i, d in enumerate(pred.get('time', []))}
+        ai = {d: i for i, d in enumerate(act.get('time', []))}
+        errs = []
+        for d in sorted(set(pi) & set(ai)):
+            try:
+                pv, av = pred[field][pi[d]], act[field][ai[d]]
+                if pv is None or av is None:
+                    continue
+                errs.append(float(pv) - float(av))
+            except Exception:
+                continue
+        if len(errs) < 5:
+            return None
+        n = len(errs)
+        bias = sum(errs) / n
+        std = (sum((e - bias) ** 2 for e in errs) / n) ** 0.5
+        rmse = (sum(e * e for e in errs) / n) ** 0.5
+        mae = sum(abs(e) for e in errs) / n
+        return {'n': n, 'bias': bias, 'std': std, 'rmse': rmse, 'mae': mae,
+                'w2': 100.0 * sum(1 for e in errs if abs(e) <= 2) / n,
+                'w3': 100.0 * sum(1 for e in errs if abs(e) <= 3) / n}
+
+    for city in targets:
+        lat, lon, tz = CITIES[city]
+        w(f"\n================ {city} ================")
+        pred, e1 = _fetch('https://historical-forecast-api.open-meteo.com/v1/forecast', lat, lon, tz)
+        act, e2 = _fetch('https://archive-api.open-meteo.com/v1/archive', lat, lon, tz)
+        if not pred or not act:
+            w(f"  fetch failed (forecast: {e1}, actual: {e2})")
+            continue
+        for label, field in [('HIGH', 'temperature_2m_max'), ('LOW', 'temperature_2m_min')]:
+            s = _stats(pred, act, field)
+            if not s:
+                w(f"  {label}: not enough data")
+                continue
+            w(f"  {label}  (n={s['n']})")
+            w(f"    bias (forecast - actual): {s['bias']:+.2f}\u00b0F   [+ = model runs hot]")
+            w(f"    error std: {s['std']:.2f}\u00b0F   RMSE: {s['rmse']:.2f}\u00b0F   MAE: {s['mae']:.2f}\u00b0F")
+            w(f"    within \u00b12\u00b0F: {s['w2']:.0f}%    within \u00b13\u00b0F: {s['w3']:.0f}%")
+
+    w("\n  HOW TO READ THIS:")
+    w("   - bias = degrees to SUBTRACT from the model mean before pricing buckets.")
+    w("   - error std / RMSE = the sigma to feed the model, instead of the")
+    w("     current guessed floor of 3\u00b0F.")
+    w("   - bias > ~2\u00b0F means the raw model is biased/mis-located for that")
+    w("     station -> don't bet it there until corrected.")
+    w("   - compare std to ~3\u00b0F: if real std is larger, the model is overconfident")
+    w("     (manufacturing edges); if smaller, it's needlessly cautious.")
     return Response("\n".join(out) + "\n", mimetype='text/plain')
 
 @app.route('/api/opportunities')
