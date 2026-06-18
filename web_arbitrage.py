@@ -1959,24 +1959,35 @@ def _f0(v):
         return None
 
 
-def _temp_bucket_prob(floor_s, cap_s, mean, std):
-    """P(daily high falls in a Kalshi temperature market) under N(mean, std).
+def _normal_bucket_prob(floor_s, cap_s, mean, std, gran=1.0):
+    """P(value falls in a Kalshi range market) under N(mean, std).
 
-    Convention confirmed from live data: interior buckets carry BOTH strikes
-    and are inclusive [floor, cap]; 'X or above' carries only floor and is
-    strictly greater (high > floor); 'X or below' carries only cap and is
-    strictly less (high < cap). Reported highs are integers, so boundaries sit
-    at the half-degree."""
+    Buckets are defined on values REPORTED to a granularity `gran` (1 deg for
+    temperatures; 0.1 for CPI/GDP percentage prints). Interior buckets carry
+    BOTH strikes and are inclusive [floor, cap]; 'X or above' carries only floor
+    and is strictly greater; 'X or below' carries only cap and is strictly less.
+    Boundaries therefore sit half a granularity step outside the strikes. Using
+    the wrong granularity (e.g. the 0.5 temperature step on a 0.1-wide CPI
+    bucket) massively inflates probabilities, so econ callers must pass gran."""
+    if std is None or std <= 0:
+        return None
+    h = gran / 2.0
     def ncdf(x):
         return 0.5 * (1 + math.erf(x / math.sqrt(2)))
     if floor_s is not None and cap_s is not None:
-        return max(0.0, ncdf((cap_s + 0.5 - mean) / std)
-                   - ncdf((floor_s - 0.5 - mean) / std))
+        return max(0.0, ncdf((cap_s + h - mean) / std)
+                   - ncdf((floor_s - h - mean) / std))
     if floor_s is not None:
-        return max(0.0, 1.0 - ncdf((floor_s + 0.5 - mean) / std))
+        return max(0.0, 1.0 - ncdf((floor_s + h - mean) / std))
     if cap_s is not None:
-        return max(0.0, ncdf((cap_s - 0.5 - mean) / std))
+        return max(0.0, ncdf((cap_s - h - mean) / std))
     return None
+
+
+def _temp_bucket_prob(floor_s, cap_s, mean, std):
+    """Daily-temperature buckets: integer-degree granularity (boundaries at the
+    half-degree). Thin wrapper so the weather path is unchanged."""
+    return _normal_bucket_prob(floor_s, cap_s, mean, std, gran=1.0)
 
 
 def _fetch_ensemble_forecast(lat, lon):
@@ -2032,6 +2043,20 @@ def _fetch_ensemble_forecast(lat, lon):
 
 
 def fetch_weather_opps():
+    # Calibration from /api/weather-backtest (archived forecast vs ERA5, the
+    # 120 days ending 2026-06-12). (bias, error_std) in degrees F per (city, band).
+    # We SUBTRACT bias from the forecast mean and use error_std as sigma instead
+    # of the old guessed 3.0 floor. Caveats: (a) ERA5 is not the exact NWS CLI
+    # settlement value, so a residual station offset can remain; (b) this window
+    # is winter->spring, so summer behaviour may differ -> re-run the backtest
+    # seasonally and update these numbers.
+    WEATHER_CALIB = {
+        ('NYC', 'high'):     (0.52, 2.83), ('NYC', 'low'):     (0.25, 2.89),
+        ('Chicago', 'high'): (-0.28, 2.24), ('Chicago', 'low'): (-2.40, 1.80),
+        ('Miami', 'high'):   (0.80, 1.28), ('Miami', 'low'):   (-1.81, 1.61),
+        ('LA', 'high'):      (-0.98, 2.18), ('LA', 'low'):      (0.10, 2.15),
+        ('Denver', 'high'):  (0.98, 2.16), ('Denver', 'low'):  (0.37, 3.35),
+    }
     opportunities = []
     try:
         WEATHER_SERIES = {
@@ -2040,11 +2065,11 @@ def fetch_weather_opps():
             'KXHIGHMIA': {'city': 'Miami',   'lat': 25.76, 'lon': -80.19,  'tz': 'America/New_York',    'kind': 'high'},
             'KXHIGHLAX': {'city': 'LA',      'lat': 34.05, 'lon': -118.24, 'tz': 'America/Los_Angeles', 'kind': 'high'},
             'KXHIGHDEN': {'city': 'Denver',  'lat': 39.74, 'lon': -104.98, 'tz': 'America/Denver',      'kind': 'high'},
-            'KXLOWNY':   {'city': 'NYC',     'lat': 40.78, 'lon': -73.97,  'tz': 'America/New_York',    'kind': 'low'},
-            'KXLOWCHI':  {'city': 'Chicago', 'lat': 41.88, 'lon': -87.63,  'tz': 'America/Chicago',     'kind': 'low'},
-            'KXLOWMIA':  {'city': 'Miami',   'lat': 25.76, 'lon': -80.19,  'tz': 'America/New_York',    'kind': 'low'},
-            'KXLOWLAX':  {'city': 'LA',      'lat': 34.05, 'lon': -118.24, 'tz': 'America/Los_Angeles', 'kind': 'low'},
-            'KXLOWDEN':  {'city': 'Denver',  'lat': 39.74, 'lon': -104.98, 'tz': 'America/Denver',      'kind': 'low'},
+            'KXLOWTNYC': {'city': 'NYC',     'lat': 40.78, 'lon': -73.97,  'tz': 'America/New_York',    'kind': 'low'},
+            'KXLOWTCHI': {'city': 'Chicago', 'lat': 41.88, 'lon': -87.63,  'tz': 'America/Chicago',     'kind': 'low'},
+            'KXLOWTMIA': {'city': 'Miami',   'lat': 25.76, 'lon': -80.19,  'tz': 'America/New_York',    'kind': 'low'},
+            'KXLOWTLAX': {'city': 'LA',      'lat': 34.05, 'lon': -118.24, 'tz': 'America/Los_Angeles', 'kind': 'low'},
+            'KXLOWTDEN': {'city': 'Denver',  'lat': 39.74, 'lon': -104.98, 'tz': 'America/Denver',      'kind': 'low'},
         }
         weather_mkts = []
         log_debug("  Fetching Kalshi weather series...")
@@ -2068,8 +2093,10 @@ def fetch_weather_opps():
                             m['_series'] = series_ticker
                             weather_mkts.append(m)
                             count += 1
-                    if count > 0:
-                        log_debug(f"    {series_ticker} ({info['city']}): {count} markets")
+                    log_debug(f"    {series_ticker} ({info['city']}, {info['kind']}): "
+                              f"{count} priced / {len(mkts)} open")
+                else:
+                    log_debug(f"    {series_ticker}: HTTP {resp.status_code}")
                 time.sleep(1.5)
             except Exception as e:
                 log_debug(f"    {series_ticker}: error {e}")
@@ -2136,6 +2163,10 @@ def fetch_weather_opps():
             if not band:
                 continue
             mean_high, std_dev = band   # mean_high holds whichever band (high or low)
+            cb = WEATHER_CALIB.get((city_key, kind))
+            if cb:
+                mean_high = mean_high - cb[0]   # remove measured bias
+                std_dev = max(1.5, cb[1])       # use measured spread as sigma
 
             yb = mkt.get('yes_bid', 0) or 0
             ya = mkt.get('yes_ask', 0) or 0
@@ -3001,6 +3032,150 @@ def weather_backtest():
     w("   - compare std to ~3\u00b0F: if real std is larger, the model is overconfident")
     w("     (manufacturing edges); if smaller, it's needlessly cautious.")
     return Response("\n".join(out) + "\n", mimetype='text/plain')
+
+def _fred_latest(series_id):
+    """Latest (date, value) for a FRED series via the no-key CSV endpoint.
+    Returns None on any failure. Skips missing ('.') rows."""
+    try:
+        url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+        r = requests.get(url, timeout=20)
+        if r.status_code != 200:
+            return None
+        lines = r.text.strip().splitlines()
+        for ln in reversed(lines[1:]):            # skip header
+            parts = ln.split(',')
+            if len(parts) < 2:
+                continue
+            date, val = parts[0].strip(), parts[-1].strip()
+            if val in ('', '.', 'NA', None):
+                continue
+            try:
+                return (date, float(val))
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return None
+
+
+@app.route('/api/econ-model')
+def econ_model():
+    """Compare authoritative nowcasts against Kalshi's economic markets, using
+    the same normal-CDF bucket math as the weather model.
+
+      GDP   : automatic (Atlanta Fed GDPNow via FRED series GDPNOW).
+      CPI   : you supply today's Cleveland Fed nowcast (it has no clean no-key
+              feed). Read it at clevelandfed.org/indicators-and-data/inflation-
+              nowcasting (updates ~10am ET), pass as MoM % SA:
+                  /api/econ-model?cpi=0.25&corecpi=0.30
+      Optional: &gdpsigma=0.9 &cpisigma=0.10  (forecast-error sigma, in % pts)
+                &gdpseries=KXGDP &cpiseries=KXCPI &coreseries=KXCPICORE
+
+    This is an INSPECTION tool first: it prints each Kalshi bucket's strikes and
+    subtitle so you can confirm the unit (MoM vs YoY) matches the nowcast you
+    feed in. Once units are confirmed and sigma is calibrated, it folds into the
+    main scan."""
+    def fnum(name, default=None):
+        try:
+            return float(request.args.get(name))
+        except (TypeError, ValueError):
+            return default
+
+    gdp_sigma = fnum('gdpsigma', 0.9)
+    cpi_sigma = fnum('cpisigma', 0.12)
+    econ_gran = fnum('gran', 0.1)   # econ prints report to 0.1; NOT the 0.5 temp step
+    gdp_series = (request.args.get('gdpseries') or 'KXGDP').upper()
+    cpi_series = (request.args.get('cpiseries') or 'KXCPI').upper()
+    core_series = (request.args.get('coreseries') or 'KXCPICORE').upper()
+
+    out = []
+    def w(s=''):
+        out.append(s)
+    w("=== ECONOMICS MODEL: nowcast vs Kalshi ===")
+    w("  GDP nowcast = Atlanta Fed GDPNow (FRED, automatic)")
+    w("  CPI nowcast = Cleveland Fed (you pass ?cpi= & ?corecpi=, MoM % SA)")
+
+    metrics = []
+    g = _fred_latest('GDPNOW')
+    if g:
+        metrics.append({'label': 'GDP real, SAAR %', 'series': gdp_series,
+                        'mean': g[1], 'sigma': gdp_sigma,
+                        'src': f"GDPNow {g[1]:+.2f}% (as of {g[0]})"})
+    else:
+        w("\n  [GDPNow fetch from FRED failed]")
+    cpi_v = fnum('cpi')
+    if cpi_v is not None:
+        metrics.append({'label': 'CPI MoM % SA', 'series': cpi_series,
+                        'mean': cpi_v, 'sigma': cpi_sigma,
+                        'src': f"Cleveland Fed nowcast {cpi_v:+.2f}% (you provided)"})
+    core_v = fnum('corecpi')
+    if core_v is not None:
+        metrics.append({'label': 'Core CPI MoM % SA', 'series': core_series,
+                        'mean': core_v, 'sigma': cpi_sigma,
+                        'src': f"Cleveland Fed nowcast {core_v:+.2f}% (you provided)"})
+
+    if not metrics:
+        w("\n  Nothing to do. GDPNow unavailable and no ?cpi=/?corecpi= passed.")
+        return Response("\n".join(out) + "\n", mimetype='text/plain')
+
+    for m in metrics:
+        w(f"\n================ {m['label']} ================")
+        w(f"  model: {m['src']}  |  sigma {m['sigma']}  |  series {m['series']}")
+        try:
+            resp = kalshi_get(f"{KALSHI_API}/markets",
+                              params={'series_ticker': m['series'],
+                                      'status': 'open', 'limit': 80}, timeout=12)
+            if resp.status_code != 200:
+                w(f"  Kalshi HTTP {resp.status_code} (series ticker wrong?)")
+                continue
+            mkts = resp.json().get('markets', [])
+        except Exception as e:
+            w(f"  Kalshi fetch error: {type(e).__name__}: {e}")
+            continue
+        if not mkts:
+            w("  no open Kalshi markets (series ticker likely wrong - tell me the")
+            w("  ticker from the Kalshi URL and I'll set it)")
+            continue
+
+        rows = []
+        for k in mkts:
+            fl = _f0(k.get('floor_strike'))
+            cp = _f0(k.get('cap_strike'))
+            if fl is None and cp is None:
+                continue
+            yb, ya, _lp = kalshi_prices(k)
+            p = _normal_bucket_prob(fl, cp, m['mean'], m['sigma'], gran=econ_gran)
+            if p is None:
+                continue
+            ya_p = ya / 100.0 if ya > 0 else None
+            yb_p = yb / 100.0 if yb > 0 else None
+            edge_yes = (p - ya_p) * 100 if ya_p is not None else -999.0
+            edge_no = (yb_p - p) * 100 if yb_p is not None else -999.0
+            side, edge = ('YES', edge_yes) if edge_yes >= edge_no else ('NO', edge_no)
+            sub = (k.get('yes_sub_title') or k.get('subtitle') or '?')[:22]
+            rows.append((k.get('event_ticker', ''), sub, fl, cp, yb, ya, p, edge, side))
+
+        if not rows:
+            w("  markets found but none had usable strikes/prices")
+            continue
+        rows.sort(key=lambda r: (r[0], r[2] if r[2] is not None else -1e9))
+        w(f"  {'bucket':<24}{'fl':>7}{'cap':>7}{'bid':>5}{'ask':>5}{'model':>7}{'edge':>8}{'side':>5}")
+        cur = None
+        for et, sub, fl, cp, yb, ya, p, edge, side in rows:
+            if et != cur:
+                w(f"  -- {et} --")
+                cur = et
+            flag = ' *' if edge >= 3 else ''
+            fls = f"{fl:g}" if fl is not None else '-'
+            cps = f"{cp:g}" if cp is not None else '-'
+            w(f"  {sub:<24}{fls:>7}{cps:>7}{str(yb):>5}{str(ya):>5}{p*100:>6.0f}%{edge:>7.1f}%{side:>5}{flag}")
+
+    w("\n  '*' = model edge >= 3% vs the price you'd PAY (ask to buy YES, 100-bid")
+    w("  to buy NO). Before trusting any of it: confirm each series' bucket unit")
+    w("  (MoM vs YoY) matches the nowcast you fed in, and treat sigma as a guess")
+    w("  until backtested against past prints.")
+    return Response("\n".join(out) + "\n", mimetype='text/plain')
+
 
 @app.route('/api/opportunities')
 def get_opportunities():
