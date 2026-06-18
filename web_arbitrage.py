@@ -2050,26 +2050,30 @@ def fetch_weather_opps():
     # settlement value, so a residual station offset can remain; (b) this window
     # is winter->spring, so summer behaviour may differ -> re-run the backtest
     # seasonally and update these numbers.
-    WEATHER_CALIB = {
-        ('NYC', 'high'):     (0.52, 2.83), ('NYC', 'low'):     (0.25, 2.89),
-        ('Chicago', 'high'): (-0.28, 2.24), ('Chicago', 'low'): (-2.40, 1.80),
-        ('Miami', 'high'):   (0.80, 1.28), ('Miami', 'low'):   (-1.81, 1.61),
-        ('LA', 'high'):      (-0.98, 2.18), ('LA', 'low'):      (0.10, 2.15),
-        ('Denver', 'high'):  (0.98, 2.16), ('Denver', 'low'):  (0.37, 3.35),
-    }
+    # Calibration CLEARED: the prior table was measured at city-center
+    # coordinates and is invalid now that we forecast the actual settlement
+    # stations (KLGA/KMDW/KMIA/KLAX/KDEN). Re-run /api/weather-backtest at the
+    # new coords, then refill {(city, band): (bias, error_std)}. Until then the
+    # model runs UNCALIBRATED: raw ensemble mean, sigma floored at 3.0.
+    WEATHER_CALIB = {}
     opportunities = []
     try:
+        # Coordinates = the NWS station each Kalshi market SETTLES on (per the
+        # contract 'About' text), NOT city center: NYC->KLGA, Chicago->KMDW,
+        # Miami->KMIA, LA->KLAX, Denver->KDEN. Forecasting downtown (esp. coastal
+        # KLAX vs downtown LA, and KDEN/DIA vs downtown Denver) shifted every
+        # bucket by several degrees and manufactured edges.
         WEATHER_SERIES = {
-            'KXHIGHNY':  {'city': 'NYC',     'lat': 40.78, 'lon': -73.97,  'tz': 'America/New_York',    'kind': 'high'},
-            'KXHIGHCHI': {'city': 'Chicago', 'lat': 41.88, 'lon': -87.63,  'tz': 'America/Chicago',     'kind': 'high'},
-            'KXHIGHMIA': {'city': 'Miami',   'lat': 25.76, 'lon': -80.19,  'tz': 'America/New_York',    'kind': 'high'},
-            'KXHIGHLAX': {'city': 'LA',      'lat': 34.05, 'lon': -118.24, 'tz': 'America/Los_Angeles', 'kind': 'high'},
-            'KXHIGHDEN': {'city': 'Denver',  'lat': 39.74, 'lon': -104.98, 'tz': 'America/Denver',      'kind': 'high'},
-            'KXLOWTNYC': {'city': 'NYC',     'lat': 40.78, 'lon': -73.97,  'tz': 'America/New_York',    'kind': 'low'},
-            'KXLOWTCHI': {'city': 'Chicago', 'lat': 41.88, 'lon': -87.63,  'tz': 'America/Chicago',     'kind': 'low'},
-            'KXLOWTMIA': {'city': 'Miami',   'lat': 25.76, 'lon': -80.19,  'tz': 'America/New_York',    'kind': 'low'},
-            'KXLOWTLAX': {'city': 'LA',      'lat': 34.05, 'lon': -118.24, 'tz': 'America/Los_Angeles', 'kind': 'low'},
-            'KXLOWTDEN': {'city': 'Denver',  'lat': 39.74, 'lon': -104.98, 'tz': 'America/Denver',      'kind': 'low'},
+            'KXHIGHNY':  {'city': 'NYC',     'lat': 40.78, 'lon': -73.87,  'tz': 'America/New_York',    'kind': 'high'},
+            'KXHIGHCHI': {'city': 'Chicago', 'lat': 41.79, 'lon': -87.75,  'tz': 'America/Chicago',     'kind': 'high'},
+            'KXHIGHMIA': {'city': 'Miami',   'lat': 25.79, 'lon': -80.29,  'tz': 'America/New_York',    'kind': 'high'},
+            'KXHIGHLAX': {'city': 'LA',      'lat': 33.94, 'lon': -118.41, 'tz': 'America/Los_Angeles', 'kind': 'high'},
+            'KXHIGHDEN': {'city': 'Denver',  'lat': 39.86, 'lon': -104.67, 'tz': 'America/Denver',      'kind': 'high'},
+            'KXLOWTNYC': {'city': 'NYC',     'lat': 40.78, 'lon': -73.87,  'tz': 'America/New_York',    'kind': 'low'},
+            'KXLOWTCHI': {'city': 'Chicago', 'lat': 41.79, 'lon': -87.75,  'tz': 'America/Chicago',     'kind': 'low'},
+            'KXLOWTMIA': {'city': 'Miami',   'lat': 25.79, 'lon': -80.29,  'tz': 'America/New_York',    'kind': 'low'},
+            'KXLOWTLAX': {'city': 'LA',      'lat': 33.94, 'lon': -118.41, 'tz': 'America/Los_Angeles', 'kind': 'low'},
+            'KXLOWTDEN': {'city': 'Denver',  'lat': 39.86, 'lon': -104.67, 'tz': 'America/Denver',      'kind': 'low'},
         }
         weather_mkts = []
         log_debug("  Fetching Kalshi weather series...")
@@ -2889,7 +2893,7 @@ def debug_odds():
     try:
         tz = 'America/New_York'
         w("\n\n=== WEATHER SAMPLE: NYC (KXHIGHNY) ===")
-        fc = _fetch_forecast_by_date(40.78, -73.97, tz)
+        fc = _fetch_forecast_by_date(40.78, -73.87, tz)
         today = _today_local(tz)
         w(f"  today (local): {today}")
         if not fc:
@@ -2942,12 +2946,12 @@ def weather_backtest():
     for the station, NOT the exact NWS Climate Report value Kalshi settles on,
     so treat the bias as approximate. For exact calibration, substitute NOAA
     CLI station observations as 'actual'."""
-    CITIES = {
-        'NYC':     (40.78, -73.97, 'America/New_York'),
-        'CHICAGO': (41.88, -87.63, 'America/Chicago'),
-        'MIAMI':   (25.76, -80.19, 'America/New_York'),
-        'LA':      (34.05, -118.24, 'America/Los_Angeles'),
-        'DENVER':  (39.74, -104.98, 'America/Denver'),
+    CITIES = {   # NWS settlement stations: KLGA, KMDW, KMIA, KLAX, KDEN
+        'NYC':     (40.78, -73.87, 'America/New_York'),
+        'CHICAGO': (41.79, -87.75, 'America/Chicago'),
+        'MIAMI':   (25.79, -80.29, 'America/New_York'),
+        'LA':      (33.94, -118.41, 'America/Los_Angeles'),
+        'DENVER':  (39.86, -104.67, 'America/Denver'),
     }
     sel = request.args.get('city', 'NYC').upper()
     try:
