@@ -203,13 +203,24 @@ def _strip_accents(s):
                    if unicodedata.category(c) != 'Mn')
 
 
+_SOCCER_ALIASES = {
+    'czechia': 'czech republic', 'czech rep': 'czech republic',
+    'korea republic': 'south korea', 'republic of korea': 'south korea',
+    'korea dpr': 'north korea', 'dpr korea': 'north korea',
+    'usa': 'united states', 'united states of america': 'united states',
+    'china pr': 'china', 'ivory coast': 'cote divoire',
+    'turkey': 'turkiye',
+}
+
+
 def _team_key(name, soccer=False):
     s = _strip_accents(str(name)).lower().strip()
     s = re.sub(r'[^a-z0-9 ]', '', s)
     s = re.sub(r'\s+', ' ', s).strip()
     if soccer:
         s = re.sub(r'\b(fc|cf|sc|afc|national team)\b', '', s).strip()
-        return re.sub(r'\s+', ' ', s)
+        s = re.sub(r'\s+', ' ', s).strip()
+        return _SOCCER_ALIASES.get(s, s)
     toks = s.split()
     if not toks:
         return s
