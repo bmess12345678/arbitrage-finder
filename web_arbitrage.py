@@ -3084,6 +3084,8 @@ def econ_model():
     gdp_sigma = fnum('gdpsigma', 0.9)
     cpi_sigma = fnum('cpisigma', 0.12)
     econ_gran = fnum('gran', 0.1)   # econ prints report to 0.1; NOT the 0.5 temp step
+    n_months = int(fnum('months', 1) or 1)   # a monthly nowcast maps to ONE release
+    max_spread = fnum('maxspread', 25)        # cents; wider = illiquid, edge is noise
     gdp_series = (request.args.get('gdpseries') or 'KXGDP').upper()
     cpi_series = (request.args.get('cpiseries') or 'KXCPI').upper()
     core_series = (request.args.get('coreseries') or 'KXCPICORE').upper()
@@ -3137,8 +3139,40 @@ def econ_model():
             w("  ticker from the Kalshi URL and I'll set it)")
             continue
 
+        # A monthly/quarterly nowcast only maps to the NEXT release, not to
+        # every open month. Keep the nearest `n_months` unsettled events
+        # (by close time), so we don't compare a June nowcast to the Nov market
+        # or to an already-settled month.
+        def _close_ts(mk):
+            for f in ('close_time', 'expiration_time', 'expected_expiration_time',
+                      'latest_expiration_time'):
+                v = mk.get(f)
+                if v:
+                    try:
+                        return datetime.fromisoformat(str(v).replace('Z', '+00:00')).timestamp()
+                    except Exception:
+                        pass
+            return None
+        now_ts = time.time()
+        ev_ts = {}
+        for k in mkts:
+            et = k.get('event_ticker', '')
+            t = _close_ts(k)
+            if t is None:
+                continue
+            ev_ts[et] = min(ev_ts.get(et, t), t)
+        future_evs = sorted((et for et, t in ev_ts.items() if t > now_ts),
+                            key=lambda e: ev_ts[e])
+        allowed = set(future_evs[:max(1, n_months)]) if future_evs else None
+        if allowed:
+            w(f"  showing nearest {len(allowed)} unsettled event(s); "
+              f"add &months=N for more")
+
         rows = []
         for k in mkts:
+            et = k.get('event_ticker', '')
+            if allowed is not None and et not in allowed:
+                continue
             fl = _f0(k.get('floor_strike'))
             cp = _f0(k.get('cap_strike'))
             if fl is None and cp is None:
@@ -3152,8 +3186,11 @@ def econ_model():
             edge_yes = (p - ya_p) * 100 if ya_p is not None else -999.0
             edge_no = (yb_p - p) * 100 if yb_p is not None else -999.0
             side, edge = ('YES', edge_yes) if edge_yes >= edge_no else ('NO', edge_no)
+            # Liquidity gate: a wide bid/ask (or a one-sided quote) means there's
+            # no real market, so the "edge" is an artifact of the spread.
+            liquid = (yb > 0 and ya > 0 and (ya - yb) <= max_spread)
             sub = (k.get('yes_sub_title') or k.get('subtitle') or '?')[:22]
-            rows.append((k.get('event_ticker', ''), sub, fl, cp, yb, ya, p, edge, side))
+            rows.append((et, sub, fl, cp, yb, ya, p, edge, side, liquid))
 
         if not rows:
             w("  markets found but none had usable strikes/prices")
@@ -3161,11 +3198,11 @@ def econ_model():
         rows.sort(key=lambda r: (r[0], r[2] if r[2] is not None else -1e9))
         w(f"  {'bucket':<24}{'fl':>7}{'cap':>7}{'bid':>5}{'ask':>5}{'model':>7}{'edge':>8}{'side':>5}")
         cur = None
-        for et, sub, fl, cp, yb, ya, p, edge, side in rows:
+        for et, sub, fl, cp, yb, ya, p, edge, side, liquid in rows:
             if et != cur:
                 w(f"  -- {et} --")
                 cur = et
-            flag = ' *' if edge >= 3 else ''
+            flag = (' *' if edge >= 3 else '') if liquid else '  (illiq)'
             fls = f"{fl:g}" if fl is not None else '-'
             cps = f"{cp:g}" if cp is not None else '-'
             w(f"  {sub:<24}{fls:>7}{cps:>7}{str(yb):>5}{str(ya):>5}{p*100:>6.0f}%{edge:>7.1f}%{side:>5}{flag}")
