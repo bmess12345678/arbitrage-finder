@@ -2563,7 +2563,12 @@ def fetch_econ_nowcast_opps():
     try:
         min_edge = float(os.environ.get('ECON_MIN_EDGE', '6'))
         metrics = []
-        g = _fred_latest('GDPNOW')
+        # GDP is OFF by default: /api/gdp-backtest measured GDPNow's near-release
+        # error at ~1.98pp (>1pp even ex-COVID) with normal-calibrated (not fat)
+        # tails, so the nowcast can't reliably beat a market that already prices
+        # it -- the apparent edges are just GDPNow's mean disagreeing with the
+        # market, which is noise. Set GDP_NOWCAST_BET=1 to experiment anyway.
+        g = _fred_latest('GDPNOW') if os.environ.get('GDP_NOWCAST_BET') == '1' else None
         if g:
             metrics.append({'label': 'Quarterly GDP (real, SAAR %)', 'series': 'KXGDP',
                             'mean': g[1], 'kind': 'gdp', 'unit': '%',
@@ -2629,7 +2634,7 @@ def fetch_econ_nowcast_opps():
                           f"> {max_days:.0f}d window \u2192 skipped (not yet reliable)")
                 continue
             if m['kind'] == 'gdp':
-                sigma = min(2.0, 0.5 + 0.018 * days)
+                sigma = 1.98   # measured near-release error (/api/gdp-backtest), not a guess
             else:
                 sigma = min(0.20, 0.05 + 0.005 * days)
 
@@ -3362,7 +3367,7 @@ def econ_model():
         except (TypeError, ValueError):
             return default
 
-    gdp_sigma = fnum('gdpsigma', 0.9)
+    gdp_sigma = fnum('gdpsigma', 1.98)   # measured near-release error from /api/gdp-backtest
     cpi_sigma = fnum('cpisigma', 0.12)
     econ_gran = fnum('gran', 0.1)   # econ prints report to 0.1; NOT the 0.5 temp step
     n_months = int(fnum('months', 1) or 1)   # a monthly nowcast maps to ONE release
