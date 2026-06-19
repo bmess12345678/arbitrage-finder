@@ -1892,15 +1892,18 @@ def _today_local(tz):
 
 def _fetch_forecast_by_date(lat, lon, tz):
     """{ 'YYYY-MM-DD': {'high': (mean,std), 'low': (mean,std)} } for the next
-    week, from the GFS ensemble member spread. std is inflated 1.3x and floored
-    (ensembles are under-dispersed). Falls back to a single blended model if the
-    ensemble call fails. Empty dict on total failure -> that city is skipped."""
+    week, blending the GFS (GEFS) and ECMWF (IFS 0.25) ensembles.
+
+    The two are combined as a 2-component mixture: the mixture std widens
+    automatically when the models DISAGREE (a divergence the market is probably
+    right to price as uncertainty -> fewer/smaller edges) and stays tight when
+    they AGREE. The blended mean is also a better central estimate than either
+    model alone. Falls back to GFS-only, then a single deterministic model."""
     base = {'latitude': lat, 'longitude': lon,
             'daily': 'temperature_2m_max,temperature_2m_min',
             'temperature_unit': 'fahrenheit',
             'forecast_days': 7,
             'timezone': tz}
-    out = {}
 
     def _agg(daily, key, ensemble):
         dates = daily.get('time') or []
@@ -1920,33 +1923,57 @@ def _fetch_forecast_by_date(lat, lon, tz):
             mean = sum(vals) / len(vals)
             if ensemble and len(vals) >= 2:
                 var = sum((t - mean) ** 2 for t in vals) / len(vals)
-                std = max(3.0, math.sqrt(var) * 1.3)
+                std = max(1.5, math.sqrt(var) * 1.3)
             else:
                 std = 4.0
             res[d] = (mean, std)
         return res
 
-    def _ingest(daily, ensemble):
+    def _model(daily, ensemble):
         highs = _agg(daily, 'temperature_2m_max', ensemble)
         lows = _agg(daily, 'temperature_2m_min', ensemble)
-        for d in set(highs) | set(lows):
-            out[d] = {'high': highs.get(d), 'low': lows.get(d)}
+        return {d: {'high': highs.get(d), 'low': lows.get(d)}
+                for d in set(highs) | set(lows)}
 
-    try:
-        p = dict(base); p['models'] = 'gfs_seamless'
-        r = requests.get(ENSEMBLE_API, params=p, timeout=12)
-        if r.status_code == 429:
-            time.sleep(3)
+    def _fetch(model_id):
+        try:
+            p = dict(base); p['models'] = model_id
             r = requests.get(ENSEMBLE_API, params=p, timeout=12)
-        if r.status_code == 200:
-            _ingest(r.json().get('daily', {}), ensemble=True)
-    except Exception:
-        pass
+            if r.status_code == 429:
+                time.sleep(3)
+                r = requests.get(ENSEMBLE_API, params=p, timeout=12)
+            if r.status_code == 200:
+                return _model(r.json().get('daily', {}), ensemble=True)
+        except Exception:
+            pass
+        return {}
+
+    gfs = _fetch('gfs_seamless')
+    ecmwf = _fetch('ecmwf_ifs025')
+
+    out = {}
+    for d in set(gfs) | set(ecmwf):
+        rec = {}
+        for band in ('high', 'low'):
+            g = gfs.get(d, {}).get(band)
+            e = ecmwf.get(d, {}).get(band)
+            if g and e:
+                gm, gs = g
+                em, es = e
+                mean = (gm + em) / 2.0
+                # 2-component equal-weight mixture variance: average of the
+                # within-model variances PLUS the between-model disagreement.
+                std = math.sqrt((gs * gs + es * es) / 2.0 + ((gm - em) / 2.0) ** 2)
+                rec[band] = (mean, std)
+            else:
+                rec[band] = g or e
+        out[d] = rec
+
     if not out:
         try:
             r = requests.get(OPEN_METEO_API, params=base, timeout=12)
             if r.status_code == 200:
-                _ingest(r.json().get('daily', {}), ensemble=False)
+                out = _model(r.json().get('daily', {}), ensemble=False)
         except Exception:
             pass
     return out
@@ -2173,11 +2200,16 @@ def fetch_weather_opps():
             band = fc[settle].get(kind)
             if not band:
                 continue
-            mean_high, std_dev = band   # mean_high holds whichever band (high or low)
+            mean_high, ens_std = band   # mean_high = band mean; ens_std grows with horizon
             cb = WEATHER_CALIB.get((city_key, kind))
             if cb:
-                mean_high = mean_high - cb[0]   # remove measured bias
-                std_dev = max(1.5, cb[1])       # use measured spread as sigma
+                mean_high = mean_high - cb[0]          # remove measured bias
+                # Fitted per-station sigma is the FLOOR; the live ensemble spread
+                # WIDENS it at longer horizons (where forecast skill decays and
+                # naive edges are fattest/falsest). Never narrower than fitted.
+                std_dev = max(cb[1], ens_std)
+            else:
+                std_dev = max(2.5, ens_std)
 
             yb = mkt.get('yes_bid', 0) or 0
             ya = mkt.get('yes_ask', 0) or 0
@@ -3190,6 +3222,72 @@ def weather_backtest():
     w("   - compare std to ~3\u00b0F: if real std is larger, the model is overconfident")
     w("     (manufacturing edges); if smaller, it's needlessly cautious.")
     return Response("\n".join(out) + "\n", mimetype='text/plain')
+
+@app.route('/api/weather-models')
+def weather_models():
+    """Diagnostic: GFS vs ECMWF for a city, so you can confirm ECMWF data is
+    coming through and see how often the two models agree (their disagreement
+    is what widens the blended sigma).   /api/weather-models?city=NYC"""
+    CITIES = {   # settlement-station coords (KLGA/KMDW/KMIA/KLAX/KDEN)
+        'NYC':     (40.78, -73.87, 'America/New_York'),
+        'CHICAGO': (41.79, -87.75, 'America/Chicago'),
+        'MIAMI':   (25.79, -80.29, 'America/New_York'),
+        'LA':      (33.94, -118.41, 'America/Los_Angeles'),
+        'DENVER':  (39.86, -104.67, 'America/Denver'),
+    }
+    city = request.args.get('city', 'NYC').upper()
+    if city not in CITIES:
+        return Response(f"unknown city. valid: {list(CITIES)}\n", mimetype='text/plain')
+    lat, lon, tz = CITIES[city]
+    out = []
+    def w(s=''):
+        out.append(s)
+    w(f"=== GFS vs ECMWF: {city} ===")
+
+    def _fetch(model_id):
+        try:
+            r = requests.get(ENSEMBLE_API, params={
+                'latitude': lat, 'longitude': lon,
+                'daily': 'temperature_2m_max,temperature_2m_min',
+                'temperature_unit': 'fahrenheit', 'forecast_days': 7,
+                'timezone': tz, 'models': model_id}, timeout=15)
+            if r.status_code != 200:
+                return None, f"HTTP {r.status_code}"
+            return r.json().get('daily', {}), None
+        except Exception as e:
+            return None, f"{type(e).__name__}: {e}"
+
+    def _means(daily, key):
+        dates = daily.get('time') or []
+        series = [v for k, v in daily.items() if k.startswith(key) and isinstance(v, list)]
+        res = {}
+        for i, d in enumerate(dates):
+            vals = [float(s[i]) for s in series if i < len(s) and s[i] is not None]
+            if vals:
+                m = sum(vals) / len(vals)
+                sd = (sum((x - m) ** 2 for x in vals) / len(vals)) ** 0.5 if len(vals) >= 2 else 0.0
+                res[d] = (m, sd, len(vals))
+        return res
+
+    g, ge = _fetch('gfs_seamless')
+    e, ee = _fetch('ecmwf_ifs025')
+    w(f"  GFS: {'OK' if g else ge}    ECMWF: {'OK' if e else ee}")
+    if not e:
+        w("  ECMWF returned nothing -> the blend safely falls back to GFS-only.")
+    gh = _means(g, 'temperature_2m_max') if g else {}
+    eh = _means(e, 'temperature_2m_max') if e else {}
+    w(f"\n  HIGH   {'date':<12}{'GFS':>8}{'ECMWF':>8}{'disagree':>9}{'mem(G/E)':>10}")
+    for d in sorted(set(gh) | set(eh)):
+        gm, em = gh.get(d), eh.get(d)
+        gs = f"{gm[0]:.1f}" if gm else "-"
+        es = f"{em[0]:.1f}" if em else "-"
+        dis = f"{abs(gm[0] - em[0]):.1f}" if (gm and em) else "-"
+        mem = f"{gm[2] if gm else 0}/{em[2] if em else 0}"
+        w(f"         {d:<12}{gs:>8}{es:>8}{dis:>9}{mem:>10}")
+    w("\n  'disagree' = |GFS-ECMWF| in F. Small = confident (tight blended sigma);")
+    w("  large = the two models conflict, so the blend widens and edges shrink.")
+    return Response("\n".join(out) + "\n", mimetype='text/plain')
+
 
 def _fred_latest(series_id):
     """Latest (date, value) for a FRED series via the no-key CSV endpoint.
