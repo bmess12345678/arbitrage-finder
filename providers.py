@@ -592,14 +592,25 @@ def _fd_params(extra=None):
 
 def _fd_event_teams(name, soccer):
     name = str(name)
+    h = a = None
     if ' @ ' in name:
         a, h = name.split(' @ ', 1)
-        return h.strip(), a.strip()
-    for sep in (' v ', ' vs ', ' vs. '):
-        if sep in name:
-            h, a = name.split(sep, 1)
-            return h.strip(), a.strip()
-    return None, None
+    else:
+        for sep in (' v ', ' vs ', ' vs. '):
+            if sep in name:
+                h, a = name.split(sep, 1)
+                break
+    if h is None or a is None:
+        return None, None
+    # FanDuel appends the probable pitcher to MLB participant names, e.g.
+    # "Athletics (G Jump)". That trailing parenthetical makes the team key
+    # the pitcher's last name ("jump"), so FanDuel MLB games never merge with
+    # Pinnacle/BetRivers. Strip a trailing (...) so names line up. No real team
+    # name ends in parentheses, and qualifier markets like "(Corners)" come from
+    # other books, so the merge-level corners rejection is untouched.
+    h = re.sub(r'\s*\([^)]*\)\s*$', '', h).strip()
+    a = re.sub(r'\s*\([^)]*\)\s*$', '', a).strip()
+    return (h, a) if h and a else (None, None)
 
 
 def _fd_ingest_markets(markets, games_by_event, cfg):
