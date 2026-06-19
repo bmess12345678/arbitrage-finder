@@ -3289,6 +3289,31 @@ def weather_models():
     return Response("\n".join(out) + "\n", mimetype='text/plain')
 
 
+def _fred_series(series_id):
+    """All (date, value) rows from a FRED series via the no-key CSV endpoint.
+    Skips missing ('.') rows. Empty list on failure."""
+    out = []
+    try:
+        url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+        r = requests.get(url, timeout=20)
+        if r.status_code != 200:
+            return out
+        for ln in r.text.strip().splitlines()[1:]:        # skip header
+            parts = ln.split(',')
+            if len(parts) < 2:
+                continue
+            date, val = parts[0].strip(), parts[-1].strip()
+            if val in ('', '.', 'NA', None):
+                continue
+            try:
+                out.append((date, float(val)))
+            except ValueError:
+                pass
+    except Exception:
+        pass
+    return out
+
+
 def _fred_latest(series_id):
     """Latest (date, value) for a FRED series via the no-key CSV endpoint.
     Returns None on any failure. Skips missing ('.') rows."""
@@ -3467,6 +3492,71 @@ def econ_model():
     w("  to buy NO). Before trusting any of it: confirm each series' bucket unit")
     w("  (MoM vs YoY) matches the nowcast you fed in, and treat sigma as a guess")
     w("  until backtested against past prints.")
+    return Response("\n".join(out) + "\n", mimetype='text/plain')
+
+
+@app.route('/api/gdp-backtest')
+def gdp_backtest():
+    """Measure GDPNow's historical error vs actual GDP growth, to replace the
+    guessed econ sigma with a fitted one and reveal TAIL FATNESS (where Kalshi
+    misprices). Both series come from FRED (no key):
+        GDPNOW           = final nowcast per completed quarter (Atlanta Fed)
+        A191RL1Q225SBEA  = actual real GDP growth, SAAR % (BEA, latest vintage)
+    Caveat: the actual is the latest vintage, not the advance estimate Kalshi
+    settles on, so advance-vs-revised adds ~0.1-0.3pp of noise to the error.
+        /api/gdp-backtest?quarters=28   (&actual=<FRED id> to override)"""
+    actual_id = (request.args.get('actual') or 'A191RL1Q225SBEA').upper()
+    try:
+        nq = max(8, min(int(request.args.get('quarters', 28)), 80))
+    except Exception:
+        nq = 28
+    out = []
+    def w(s=''):
+        out.append(s)
+    w("=== GDPNow ERROR BACKTEST ===")
+    w("  nowcast = FRED GDPNOW (final per quarter)")
+    w(f"  actual  = FRED {actual_id} (real GDP growth, SAAR %, latest vintage)")
+    w("  caveat: actual = latest vintage, not the advance estimate Kalshi settles on")
+
+    nc = dict(_fred_series('GDPNOW'))
+    ac = dict(_fred_series(actual_id))
+    if not nc or not ac:
+        w(f"\n  fetch failed (GDPNOW rows={len(nc)}, {actual_id} rows={len(ac)})")
+        return Response("\n".join(out) + "\n", mimetype='text/plain')
+
+    common = sorted(set(nc) & set(ac))          # matched => completed quarters
+    rows = [(d, nc[d], ac[d], nc[d] - ac[d]) for d in common][-nq:]
+    if len(rows) < 8:
+        w(f"\n  only {len(rows)} matched quarters (need >=8). "
+          f"GDPNOW dates may not align with {actual_id} dates.")
+        return Response("\n".join(out) + "\n", mimetype='text/plain')
+
+    errs = [r[3] for r in rows]
+    n = len(errs)
+    bias = sum(errs) / n
+    std = (sum((e - bias) ** 2 for e in errs) / n) ** 0.5
+    mae = sum(abs(e) for e in errs) / n
+    w(f"\n  matched quarters: {n}  ({rows[0][0]} .. {rows[-1][0]})")
+    w(f"  bias (nowcast - actual): {bias:+.2f}pp   [+ = GDPNow runs high]")
+    w(f"  error std: {std:.2f}pp   MAE: {mae:.2f}pp")
+
+    def ncdf(x):
+        return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+    w("\n  tail calibration  (how often |nowcast-actual| exceeds a threshold):")
+    w(f"    {'thresh':>9}{'empirical':>11}{'normal':>9}")
+    for t in (0.5, 1.0, 1.5, 2.0, 2.5):
+        emp = 100.0 * sum(1 for e in errs if abs(e - bias) > t) / n
+        nrm = 100.0 * 2 * (1 - ncdf(t / std)) if std > 0 else 0.0
+        w(f"    {t:>7.1f}pp{emp:>10.0f}%{nrm:>8.0f}%")
+
+    w("\n  recent quarters (nowcast vs actual):")
+    for d, nv, av, er in rows[-12:]:
+        w(f"    {d}   nowcast {nv:+5.1f}   actual {av:+5.1f}   err {er:+5.1f}")
+
+    w(f"\n  USE: set the econ GDP sigma near {std:.2f} (the fitted near-release")
+    w("  error) instead of the 0.5-formula guess. Where 'empirical' exceeds")
+    w("  'normal' at the larger thresholds, GDPNow errors are FAT-TAILED, so")
+    w("  Kalshi's far brackets are underpriced -> favor buying those tails.")
     return Response("\n".join(out) + "\n", mimetype='text/plain')
 
 
