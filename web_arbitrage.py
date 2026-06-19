@@ -2050,12 +2050,19 @@ def fetch_weather_opps():
     # settlement value, so a residual station offset can remain; (b) this window
     # is winter->spring, so summer behaviour may differ -> re-run the backtest
     # seasonally and update these numbers.
-    # Calibration CLEARED: the prior table was measured at city-center
-    # coordinates and is invalid now that we forecast the actual settlement
-    # stations (KLGA/KMDW/KMIA/KLAX/KDEN). Re-run /api/weather-backtest at the
-    # new coords, then refill {(city, band): (bias, error_std)}. Until then the
-    # model runs UNCALIBRATED: raw ensemble mean, sigma floored at 3.0.
-    WEATHER_CALIB = {}
+    # Calibration from /api/weather-backtest at the CORRECTED settlement
+    # stations (KLGA/KMDW/KMIA/KLAX/KDEN), 120d ending 2026-06-12.
+    # (bias, sigma): bias is subtracted from the forecast mean; sigma is the
+    # measured forecast-vs-ERA5 error std inflated in quadrature by ~1.2 deg F
+    # to cover the ERA5-vs-actual-CLI gap (ERA5 != the exact settlement value),
+    # which guards against tight-sigma overconfidence. Re-run seasonally.
+    WEATHER_CALIB = {
+        ('NYC', 'high'):     (0.47, 3.1), ('NYC', 'low'):     (0.13, 3.1),
+        ('Chicago', 'high'): (0.32, 2.2), ('Chicago', 'low'): (0.11, 2.2),
+        ('Miami', 'high'):   (0.33, 1.9), ('Miami', 'low'):   (0.56, 1.9),
+        ('LA', 'high'):      (0.56, 2.4), ('LA', 'low'):      (-0.87, 1.9),
+        ('Denver', 'high'):  (-0.81, 2.3), ('Denver', 'low'): (-1.15, 2.9),
+    }
     opportunities = []
     try:
         # Coordinates = the NWS station each Kalshi market SETTLES on (per the
@@ -2507,6 +2514,149 @@ def fetch_econ_opps():
 # MAIN SCAN
 # ============================================================
 
+def fetch_econ_nowcast_opps():
+    """Nowcast-vs-Kalshi econ bets for the MAIN scan, gated hard so only
+    defensible signals surface.
+
+    GDP auto-pulls from FRED (Atlanta Fed GDPNow). CPI/core CPI have NO public
+    feed (the Cleveland Fed page is JS-only), so they run only if you set env
+    vars CPI_NOWCAST / CORECPI_NOWCAST on Render to today's MoM% reading.
+
+    Sigma scales with days-to-release: far from a print the nowcast is uncertain
+    (wide sigma -> probabilities near the market -> few/no edges); near a print
+    it is accurate (tight sigma -> genuine mispricings surface). Only liquid
+    markets and edges >= ECON_MIN_EDGE (default 6%) are emitted, and they're
+    labelled as model leans, NOT arbs."""
+    opportunities = []
+    try:
+        min_edge = float(os.environ.get('ECON_MIN_EDGE', '6'))
+        metrics = []
+        g = _fred_latest('GDPNOW')
+        if g:
+            metrics.append({'label': 'Quarterly GDP (real, SAAR %)', 'series': 'KXGDP',
+                            'mean': g[1], 'kind': 'gdp', 'unit': '%',
+                            'src': f'GDPNow {g[1]:+.2f}% ({g[0]})'})
+        for env_key, series, lab in [('CPI_NOWCAST', 'KXCPI', 'CPI MoM %'),
+                                     ('CORECPI_NOWCAST', 'KXCPICORE', 'Core CPI MoM %')]:
+            v = os.environ.get(env_key)
+            if v:
+                try:
+                    metrics.append({'label': lab, 'series': series, 'mean': float(v),
+                                    'kind': 'cpi', 'unit': '%',
+                                    'src': f'Cleveland Fed nowcast {float(v):+.2f}%'})
+                except ValueError:
+                    pass
+        if not metrics:
+            log_debug("  Econ nowcast: no GDPNow and no CPI env vars -> skipped")
+            return []
+
+        now = time.time()
+
+        def _close_ts(mk):
+            for f in ('close_time', 'expiration_time', 'expected_expiration_time'):
+                v = mk.get(f)
+                if v:
+                    try:
+                        return datetime.fromisoformat(str(v).replace('Z', '+00:00')).timestamp()
+                    except Exception:
+                        pass
+            return None
+
+        for m in metrics:
+            try:
+                resp = kalshi_get(f"{KALSHI_API}/markets",
+                                  params={'series_ticker': m['series'],
+                                          'status': 'open', 'limit': 80}, timeout=12)
+                if resp.status_code != 200:
+                    continue
+                mkts = resp.json().get('markets', [])
+            except Exception:
+                continue
+            if not mkts:
+                continue
+
+            ev_ts = {}
+            for k in mkts:
+                t = _close_ts(k)
+                if t:
+                    et = k.get('event_ticker', '')
+                    ev_ts[et] = min(ev_ts.get(et, t), t)
+            fut = sorted((e for e, t in ev_ts.items() if t > now), key=lambda e: ev_ts[e])
+            if not fut:
+                continue
+            target = fut[0]
+            days = max(0.0, (ev_ts[target] - now) / 86400.0)
+            # Release-window gate. Far from a print the nowcast isn't reliable
+            # AND the market is deliberately pricing away from it (e.g. fading
+            # GDPNow's early-quarter optimism), so a "gap" is not an edge. Only
+            # within ECON_MAX_DAYS of the release — where the nowcast is accurate
+            # and a persistent mispricing is more likely real — do we emit.
+            max_days = float(os.environ.get('ECON_MAX_DAYS', '10'))
+            if days > max_days:
+                log_debug(f"  Econ nowcast {m['series']}: {days:.0f}d to release "
+                          f"> {max_days:.0f}d window \u2192 skipped (not yet reliable)")
+                continue
+            if m['kind'] == 'gdp':
+                sigma = min(2.0, 0.5 + 0.018 * days)
+            else:
+                sigma = min(0.20, 0.05 + 0.005 * days)
+
+            n_emitted = 0
+            for k in mkts:
+                if k.get('event_ticker', '') != target:
+                    continue
+                fl = _f0(k.get('floor_strike'))
+                cp = _f0(k.get('cap_strike'))
+                if fl is None and cp is None:
+                    continue
+                yb, ya, _lp = kalshi_prices(k)
+                if not (yb > 0 and ya > 0 and (ya - yb) <= 20):   # liquidity gate
+                    continue
+                p = _normal_bucket_prob(fl, cp, m['mean'], sigma, gran=0.1)
+                if p is None or p < 0.02 or p > 0.98:
+                    continue
+                ya_p, yb_p = ya / 100.0, yb / 100.0
+                edge_yes = (p - ya_p) * 100
+                edge_no = (yb_p - p) * 100
+                if edge_yes >= edge_no:
+                    side, edge, price, prob = 'YES', edge_yes, ya_p, p
+                else:
+                    side, edge, price, prob = 'NO', edge_no, 1.0 - yb_p, 1.0 - p
+                if edge < min_edge:
+                    continue
+                sub = (k.get('yes_sub_title') or k.get('subtitle') or '?').strip()
+                price_c = round(price * 100)
+                am = round(implied_to_american(clamp_prob(price))) if 0 < price < 1 else 0
+                opportunities.append({
+                    'player': f"{m['label']}: {sub} \u2014 {side}",
+                    'game': f"{m['src']} \u00b7 \u03c3{sigma:.2f} \u00b7 {days:.0f}d to release \u00b7 "
+                            f"model lean, not an arb",
+                    'commence': '', 'market': 'Economic (nowcast)',
+                    'book': 'Kalshi', 'book_key': 'kalshi', 'type': 'economic',
+                    'edge': round(edge, 1), 'gross_edge': round(edge, 1),
+                    'recommendation': f"Buy {side} at ~{price_c}\u00a2 \u2014 {m['src']}, model "
+                                      f"{prob*100:.0f}% vs market {price_c}\u00a2 (\u03c3 grows with "
+                                      f"days-to-release; verify GDPNow is current)",
+                    'odds': am,
+                    'label1_name': f'Buy {side} on Kalshi', 'label1_value': f"~{price_c}\u00a2",
+                    'label2_name': 'Model says', 'label2_value': f"{prob*100:.0f}% likely",
+                    'label3_name': 'Edge', 'label3_value': f"+{edge:.1f}%",
+                    'target_prob': round(price * 100, 1),
+                    'fair_prob': round(prob * 100, 1),
+                    'juice_display': f"nowcast \u00b1{sigma:.2f}{m['unit']} ({days:.0f}d out)",
+                    'consensus_books': 0,
+                    'kelly_fraction': round(quarter_kelly(prob, am) * 100, 2) if am else 0,
+                    'affiliate_url': affiliate_url('kalshi'),
+                })
+                n_emitted += 1
+            log_debug(f"  Econ nowcast {m['series']}: {m['src']}, {days:.0f}d out, "
+                      f"\u03c3{sigma:.2f} \u2192 {n_emitted} edges \u2265 {min_edge:.0f}%")
+        return opportunities
+    except Exception as e:
+        log_debug(f"  Econ nowcast error: {e}")
+        return []
+
+
 def scan_markets():
     global _dead_keys
     with _state_lock:
@@ -2602,6 +2752,10 @@ def scan_markets():
         all_opps.extend(fetch_econ_opps())
     except Exception as e:
         log_debug(f"  Economic failed: {e}")
+    try:
+        all_opps.extend(fetch_econ_nowcast_opps())
+    except Exception as e:
+        log_debug(f"  Econ nowcast failed: {e}")
 
     # Sort: arbs first, then by edge descending
     all_opps.sort(key=lambda x: (0 if x['type'] == 'arbitrage' else 1, -x['edge']))
