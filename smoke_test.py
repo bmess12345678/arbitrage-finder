@@ -58,13 +58,15 @@ def main():
             try:
                 games = fn(sport, log=quiet) or []
                 gl = sum(len(g['h2h']) for g in games)
+                sp = sum(len(g.get('spreads', [])) for g in games)
+                tt = sum(len(g.get('totals', [])) for g in games)
                 pr = sum(len(v) for g in games for v in g['props'].values())
                 per_book[name] = games
                 flag = 'OK ' if games else '-- '
                 if games:
                     grand_ok += 1
                 print(f"  {flag}{name:<11} games={len(games):<4} "
-                      f"ml_rows={gl:<5} prop_rows={pr:<5} "
+                      f"ml={gl:<4} sprd={sp:<4} tot={tt:<4} props={pr:<5} "
                       f"({time.time()-t0:.1f}s)")
             except Exception as e:
                 per_book[name] = []
