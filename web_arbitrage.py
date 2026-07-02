@@ -88,6 +88,15 @@ MIN_EDGE_NET = 0.1  # Minimum edge % to surface
 # a real opportunity. Real +EV vs a sharp consensus lives in the low single
 # digits; a 20%+ "edge" on a moneyline does not exist in a liquid market.
 MAX_EDGE_NET = float(os.environ.get('MAX_EDGE', '20'))
+# Spreads/totals price near coin-flips, so probability gaps are inherently
+# small: a genuine point-market edge vs Pinnacle's main line is 1-5%.
+# Anything larger is a stale snapshot or a line that moved mid-fetch.
+MAX_EDGE_POINT = float(os.environ.get('MAX_EDGE_POINT', '8'))
+
+# Middles: max worst-case cost (as % of combined stake) worth surfacing.
+# A 2-pt NFL total middle hits ~8-12%; break-even ≈ cost, so 3% is generous.
+MIDDLE_MAX_COST = float(os.environ.get('MIDDLE_MAX_COST', '3.0'))
+MIDDLE_MIN_GAP = float(os.environ.get('MIDDLE_MIN_GAP', '1.0'))
 
 # ============================================================
 # AFFILIATE LINKS (set these env vars to activate; left blank = no link shown)
@@ -128,13 +137,37 @@ BOOK_DISPLAY = {
 BOOK_KEY_LOOKUP = {v: k for k, v in BOOK_DISPLAY.items()}
 
 GAME_MARKETS = [
-    ('basketball_nba', 'h2h', 'NBA Moneyline'),
-    ('basketball_ncaab', 'h2h', 'NCAAB Moneyline'),
-    ('icehockey_nhl', 'h2h', 'NHL Moneyline'),
-    ('soccer_fifa_world_cup', 'h2h', 'World Cup Moneyline'),  # 3-way; handled by n-way devig
+    # (sport_key, market, display) — spreads/totals reuse the SAME direct-feed
+    # snapshot as h2h (55s TTL), so extra rows cost zero additional book hits.
+    # Ordered in-season-first so API-key fallback quota goes where games are.
     ('baseball_mlb', 'h2h', 'MLB Moneyline'),
+    ('baseball_mlb', 'spreads', 'MLB Run Line'),
+    ('baseball_mlb', 'totals', 'MLB Totals'),
+    ('soccer_fifa_world_cup', 'h2h', 'World Cup Moneyline'),  # 3-way; n-way devig
+    ('soccer_fifa_world_cup', 'totals', 'World Cup Totals'),
     ('basketball_wnba', 'h2h', 'WNBA Moneyline'),
+    ('basketball_wnba', 'spreads', 'WNBA Spread'),
+    ('basketball_wnba', 'totals', 'WNBA Totals'),
+    ('soccer_usa_mls', 'h2h', 'MLS Moneyline'),               # 3-way
+    ('soccer_usa_mls', 'totals', 'MLS Totals'),
+    ('americanfootball_nfl', 'h2h', 'NFL Moneyline'),         # lights up in Aug
+    ('americanfootball_nfl', 'spreads', 'NFL Spread'),
+    ('americanfootball_nfl', 'totals', 'NFL Totals'),
+    ('americanfootball_ncaaf', 'h2h', 'NCAAF Moneyline'),
+    ('americanfootball_ncaaf', 'spreads', 'NCAAF Spread'),
+    ('americanfootball_ncaaf', 'totals', 'NCAAF Totals'),
+    ('basketball_nba', 'h2h', 'NBA Moneyline'),
+    ('basketball_nba', 'spreads', 'NBA Spread'),
+    ('basketball_nba', 'totals', 'NBA Totals'),
+    ('icehockey_nhl', 'h2h', 'NHL Moneyline'),
+    ('icehockey_nhl', 'spreads', 'NHL Puck Line'),
+    ('icehockey_nhl', 'totals', 'NHL Totals'),
+    ('basketball_ncaab', 'h2h', 'NCAAB Moneyline'),
+    ('basketball_ncaab', 'spreads', 'NCAAB Spread'),
+    ('basketball_ncaab', 'totals', 'NCAAB Totals'),
 ]
+
+GAME_MARKET_KEYS = ('h2h', 'spreads', 'totals')
 
 PROP_MARKETS = [
     ('basketball_nba', [
@@ -157,6 +190,11 @@ PROP_MARKETS = [
     ('baseball_mlb', [
         ('player_strikeouts', 'MLB Pitcher Strikeouts'),
         ('player_total_bases', 'MLB Total Bases'),
+    ], 8),
+    ('americanfootball_nfl', [
+        ('player_pass_yds', 'NFL Pass Yards'),
+        ('player_rush_yds', 'NFL Rush Yards'),
+        ('player_receptions', 'NFL Receptions'),
     ], 8),
 ]
 
@@ -681,6 +719,24 @@ def _cache_set(key, data):
     with _cache_lock:
         _odds_cache[key] = (data, time.time())
 
+def _slice_market(data, market):
+    """Cut a multi-market Odds API response down to one market key."""
+    out = []
+    for g in data or []:
+        bks = []
+        for bk in g.get('bookmakers', []):
+            ms = [m for m in bk.get('markets', []) if m.get('key') == market]
+            if ms:
+                nb = dict(bk)
+                nb['markets'] = ms
+                bks.append(nb)
+        if bks:
+            ng = dict(g)
+            ng['bookmakers'] = bks
+            out.append(ng)
+    return out
+
+
 def fetch_odds(sport, market):
     cache_key = f"odds:{sport}:{market}"
     cached = _cache_get(cache_key)
@@ -706,9 +762,13 @@ def fetch_odds(sport, market):
     if not key:
         log_debug(f"  {sport}/{market}: All keys exhausted!")
         return None
+    # Game markets: request h2h+spreads+totals together (same credit cost as
+    # three separate calls, one third of the HTTP) and cache every slice.
+    combined = market in GAME_MARKET_KEYS
+    req_markets = ','.join(GAME_MARKET_KEYS) if combined else market
     url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds"
     params = {
-        'apiKey': key, 'regions': 'us,us2', 'markets': market,
+        'apiKey': key, 'regions': 'us,us2', 'markets': req_markets,
         'bookmakers': ','.join(ALL_BOOKS), 'oddsFormat': 'american'
     }
     try:
@@ -716,7 +776,16 @@ def fetch_odds(sport, market):
         if r.status_code == 200:
             data = r.json()
             left = r.headers.get('x-requests-remaining', '?')
-            log_debug(f"  {sport}/{market}: {len(data)} games (key ...{key[-6:]}, left: {left})")
+            log_debug(f"  {sport}/{req_markets}: {len(data)} games "
+                      f"(key ...{key[-6:]}, left: {left})")
+            if combined:
+                want = None
+                for mk in GAME_MARKET_KEYS:
+                    sliced = _slice_market(data, mk)
+                    _cache_set(f"odds:{sport}:{mk}", sliced)
+                    if mk == market:
+                        want = sliced
+                return want
             _cache_set(cache_key, data)
             return data
         elif r.status_code == 401:
@@ -1133,8 +1202,10 @@ def analyze_game_markets(games_data, market_name="", poly_games=None, kalshi_gam
         for bk in book_devigged:
             for k in book_devigged[bk]:
                 name, pt = k
-                if name == home: home_key = k
-                elif name == away: away_key = k
+                if pt is not None:
+                    continue          # Kalshi/Poly win-probs are MONEYLINE
+                if name == home: home_key = k    # probabilities; never map
+                elif name == away: away_key = k  # them onto spread/total keys
             if home_key and away_key:
                 break
 
@@ -1203,7 +1274,10 @@ def analyze_game_markets(games_data, market_name="", poly_games=None, kalshi_gam
                 gross_edge = (consensus_fair - eval_fair) * 100
                 juice_pct = book_juice.get(eval_book, 0)
 
-                if net_edge < MIN_EDGE_NET or net_edge > MAX_EDGE_NET:
+                # Point markets (spreads/totals) cluster near 50/50 — a big
+                # "edge" there is a stale line, not free money.
+                edge_cap = MAX_EDGE_POINT if key[1] is not None else MAX_EDGE_NET
+                if net_edge < MIN_EDGE_NET or net_edge > edge_cap:
                     continue
 
                 name, point = key
@@ -1444,7 +1518,40 @@ def analyze_player_props(games_data, market_name="", kalshi_props=None, poly_pro
 # ARBITRAGE DETECTION
 # ============================================================
 
+def _is_half_line(x):
+    """True for clean .5 lines (no push risk on either leg)."""
+    try:
+        return abs(x * 2 - round(x * 2)) < 0.01 and abs(x - round(x)) > 0.25
+    except (TypeError, ValueError):
+        return False
+
+
+def _middle_ints(lo, hi):
+    """Integers strictly inside (lo, hi) — the outcomes that cash BOTH legs."""
+    out = []
+    n = math.floor(lo) + 1
+    while n < hi:
+        if n > lo:
+            out.append(n)
+        n += 1
+    return out
+
+
 def find_game_arbs(games_data, market_name=""):
+    """Cross-book scalps on game markets.
+
+    Emits two families:
+      * type 'arbitrage' — complementary legs at the SAME line whose combined
+        implied < 100% (risk-free).
+      * type 'middle'    — Over x / Under y (y > x) or A -x / B +y across
+        books: one leg always wins, both win if the number lands in the gap.
+        Not risk-free; the card reports worst-case cost and the break-even
+        hit rate (= the overround) so the decision is explicit.
+
+    Pairing is strictly complementary — Over never pairs with Over, and
+    spread legs must be opposite teams — so mismatched lines can never
+    masquerade as "guaranteed profit".
+    """
     if not games_data:
         return []
     arbs = []
@@ -1471,18 +1578,126 @@ def find_game_arbs(games_data, market_name=""):
             all_keys.update(book_odds[bk].keys())
         keys_list = sorted(all_keys, key=str)
 
-        # 3-way moneylines (soccer): a real arb needs ALL THREE legs.
-        # Best home + best away always sums < 100% when a draw exists, so the
-        # 2-leg path below would emit fake "guaranteed profit" rows. Handle here.
-        if len(keys_list) == 3 and all(k[1] is None for k in keys_list):
+        ml_keys = [k for k in keys_list if k[1] is None]
+        tot_keys = [k for k in keys_list
+                    if k[1] is not None and k[0] in ('Over', 'Under')]
+        sp_keys = [k for k in keys_list
+                   if k[1] is not None and k[0] not in ('Over', 'Under')]
+
+        def _best(key):
+            bo, bb = None, None
+            for bk in book_odds:
+                if bk not in CO_BETTABLE or key not in book_odds[bk]:
+                    continue
+                o = book_odds[bk][key]
+                if bo is None or american_to_implied(o) < american_to_implied(bo):
+                    bo, bb = o, bk
+            return bo, bb
+
+        def _dn(key):
+            name, point = key
+            if point is None:
+                return f"{name} ML"
+            if name in ('Over', 'Under'):
+                return f"{name} {point:g}"
+            return f"{name} {point:+g}"
+
+        def _emit_arb(key_a, key_b):
+            oa, ba = _best(key_a)
+            ob, bb = _best(key_b)
+            if oa is None or ob is None or ba == bb:
+                return
+            imp_a, imp_b = american_to_implied(oa), american_to_implied(ob)
+            total = imp_a + imp_b
+            if total >= 1.0:
+                return
+            profit_pct = round((1.0 - total) * 100, 2)
+            dn_a, dn_b = _dn(key_a), _dn(key_b)
+            stake_a = round(100 * imp_a / total, 2)
+            stake_b = round(100 - stake_a, 2)
+            arbs.append({
+                'player': f"ARB: {dn_a} + {dn_b}", 'game': game_info,
+                'commence': commence, 'market': market_name,
+                'book': f"{BOOK_DISPLAY.get(ba, ba)} / {BOOK_DISPLAY.get(bb, bb)}",
+                'type': 'arbitrage',
+                'edge': profit_pct, 'gross_edge': profit_pct,
+                'recommendation': f"Guaranteed {profit_pct}% profit",
+                'odds': oa,
+                'label1_name': f'{BOOK_DISPLAY.get(ba, ba)}: {dn_a}',
+                'label1_value': format_american(oa),
+                'label2_name': f'{BOOK_DISPLAY.get(bb, bb)}: {dn_b}',
+                'label2_value': format_american(ob),
+                'label3_name': 'Guaranteed Profit',
+                'label3_value': f"+{profit_pct}%",
+                'target_prob': round(total * 100, 1), 'fair_prob': 100.0,
+                'juice_display': f"{round(total * 100, 1)}% combined",
+                'stake_a': stake_a, 'stake_b': stake_b,
+                'affiliate_url_a': affiliate_url(ba),
+                'affiliate_url_b': affiliate_url(bb),
+            })
+
+        def _emit_middle(key_a, key_b, window_lo, window_hi, kind):
+            oa, ba = _best(key_a)
+            ob, bb = _best(key_b)
+            if oa is None or ob is None:
+                return
+            ints = _middle_ints(window_lo, window_hi)
+            if not ints:
+                return
+            imp_a, imp_b = american_to_implied(oa), american_to_implied(ob)
+            total = imp_a + imp_b
+            # combined < 100% => it's an arb WITH middle upside; route there
+            if total < 1.0:
+                _emit_arb(key_a, key_b)
+                return
+            r = 1.0 / total            # single-win return per $1 staked
+            cost_pct = (1.0 - r) * 100.0        # worst-case loss
+            win_pct = (2.0 * r - 1.0) * 100.0   # both-legs-hit profit
+            be_pct = (total - 1.0) * 100.0      # break-even hit rate
+            if cost_pct > MIDDLE_MAX_COST:
+                return
+            dn_a, dn_b = _dn(key_a), _dn(key_b)
+            ints_str = '/'.join(str(i) for i in ints)
+            if kind == 'total':
+                window = f"total lands on {ints_str}"
+            else:
+                fav = key_a[0] if key_a[1] < 0 else key_b[0]
+                window = f"{fav} wins by exactly {ints_str}"
+            stake_a = round(100 * imp_a / total, 2)
+            stake_b = round(100 - stake_a, 2)
+            arbs.append({
+                'player': f"MIDDLE: {dn_a} + {dn_b}", 'game': game_info,
+                'commence': commence, 'market': market_name,
+                'book': f"{BOOK_DISPLAY.get(ba, ba)} / {BOOK_DISPLAY.get(bb, bb)}",
+                'type': 'middle', 'edge': 0.0, 'gross_edge': 0.0,
+                'be_pct': round(be_pct, 2), 'cost_pct': round(cost_pct, 2),
+                'win_pct': round(win_pct, 1),
+                'middle_window': window,
+                'recommendation': (
+                    f"One leg always wins. If {window}, BOTH legs cash for "
+                    f"+{win_pct:.1f}%; otherwise you lose {cost_pct:.2f}%. "
+                    f"Break-even hit rate: {be_pct:.2f}%"),
+                'odds': oa,
+                'label1_name': f'{BOOK_DISPLAY.get(ba, ba)}: {dn_a}',
+                'label1_value': format_american(oa),
+                'label2_name': f'{BOOK_DISPLAY.get(bb, bb)}: {dn_b}',
+                'label2_value': format_american(ob),
+                'label3_name': 'Break-even Hit Rate',
+                'label3_value': f"{be_pct:.2f}%",
+                'target_prob': round(total * 100, 1), 'fair_prob': 100.0,
+                'juice_display': f"{round(total * 100, 1)}% combined",
+                'stake_a': stake_a, 'stake_b': stake_b,
+                'affiliate_url_a': affiliate_url(ba),
+                'affiliate_url_b': affiliate_url(bb),
+            })
+
+        # ---- 3-way moneylines (soccer): a real arb needs ALL THREE legs ----
+        if len(ml_keys) == 3:
             best = {}
-            for k in keys_list:
-                for bk in book_odds:
-                    if bk not in CO_BETTABLE or k not in book_odds[bk]:
-                        continue
-                    o = book_odds[bk][k]
-                    if k not in best or american_to_implied(o) < american_to_implied(best[k][0]):
-                        best[k] = (o, bk)
+            for k in ml_keys:
+                o, b = _best(k)
+                if o is not None:
+                    best[k] = (o, b)
             if len(best) == 3:
                 imps = {k: american_to_implied(v[0]) for k, v in best.items()}
                 total3 = sum(imps.values())
@@ -1490,15 +1705,17 @@ def find_game_arbs(games_data, market_name=""):
                     profit_pct = round((1.0 - total3) * 100, 2)
                     legs = ' + '.join(
                         f"{k[0]} @ {BOOK_DISPLAY.get(best[k][1], best[k][1])} "
-                        f"{format_american(best[k][0])}" for k in keys_list)
+                        f"{format_american(best[k][0])}" for k in ml_keys)
                     arbs.append({
-                        'player': f"ARB (3-way): {' / '.join(k[0] for k in keys_list)}",
-                        'game': game_info, 'commence': commence, 'market': market_name,
+                        'player': f"ARB (3-way): {' / '.join(k[0] for k in ml_keys)}",
+                        'game': game_info, 'commence': commence,
+                        'market': market_name,
                         'book': ' / '.join(sorted({BOOK_DISPLAY.get(v[1], v[1])
                                                    for v in best.values()})),
-                        'type': 'arbitrage', 'edge': profit_pct, 'gross_edge': profit_pct,
+                        'type': 'arbitrage', 'edge': profit_pct,
+                        'gross_edge': profit_pct,
                         'recommendation': f"Guaranteed {profit_pct}% profit: {legs}",
-                        'odds': best[keys_list[0]][0],
+                        'odds': best[ml_keys[0]][0],
                         'label1_name': 'Legs', 'label1_value': legs,
                         'label2_name': 'Combined Implied',
                         'label2_value': f"{round(total3 * 100, 1)}%",
@@ -1506,69 +1723,38 @@ def find_game_arbs(games_data, market_name=""):
                         'label3_value': f"+{profit_pct}%",
                         'target_prob': round(total3 * 100, 1), 'fair_prob': 100.0,
                         'juice_display': f"{round(total3 * 100, 1)}% combined",
-                        'stake_a': round(100 * imps[keys_list[0]] / total3, 2),
-                        'stake_b': round(100 * imps[keys_list[1]] / total3, 2),
+                        'stake_a': round(100 * imps[ml_keys[0]] / total3, 2),
+                        'stake_b': round(100 * imps[ml_keys[1]] / total3, 2),
                     })
-            continue
+        elif len(ml_keys) == 2:
+            _emit_arb(ml_keys[0], ml_keys[1])
 
-        if len(keys_list) != 2:
-            continue
+        # ---- totals: same-line arbs + cross-line middles ----
+        overs = sorted((k for k in tot_keys if k[0] == 'Over'),
+                       key=lambda k: k[1])
+        unders = sorted((k for k in tot_keys if k[0] == 'Under'),
+                        key=lambda k: k[1])
+        for ok in overs:
+            for uk in unders:
+                if abs(ok[1] - uk[1]) < 0.01:
+                    _emit_arb(ok, uk)
+                elif (uk[1] - ok[1] >= MIDDLE_MIN_GAP
+                      and _is_half_line(ok[1]) and _is_half_line(uk[1])):
+                    _emit_middle(ok, uk, ok[1], uk[1], kind='total')
 
-        side_a_key = keys_list[0]
-        side_b_key = keys_list[1]
-        best_a_odds = best_b_odds = None
-        best_a_book = best_b_book = None
-
-        for bk in book_odds:
-            if bk not in CO_BETTABLE:
-                continue
-            if side_a_key in book_odds[bk]:
-                odds_a = book_odds[bk][side_a_key]
-                if best_a_odds is None or american_to_implied(odds_a) < american_to_implied(best_a_odds):
-                    best_a_odds = odds_a
-                    best_a_book = bk
-            if side_b_key in book_odds[bk]:
-                odds_b = book_odds[bk][side_b_key]
-                if best_b_odds is None or american_to_implied(odds_b) < american_to_implied(best_b_odds):
-                    best_b_odds = odds_b
-                    best_b_book = bk
-
-        if best_a_odds is None or best_b_odds is None:
-            continue
-        if best_a_book == best_b_book:
-            continue
-
-        imp_a = american_to_implied(best_a_odds)
-        imp_b = american_to_implied(best_b_odds)
-        total = imp_a + imp_b
-        if total < 1.0:
-            profit_pct = round((1.0 - total) * 100, 2)
-            name_a, point_a = side_a_key
-            name_b, point_b = side_b_key
-            dn_a = f"{name_a} ML" if point_a is None else f"{name_a} {point_a:+.1f}"
-            dn_b = f"{name_b} ML" if point_b is None else f"{name_b} {point_b:+.1f}"
-            stake_a = round(100 * imp_a / (imp_a + imp_b), 2)
-            stake_b = round(100 - stake_a, 2)
-
-            arbs.append({
-                'player': f"ARB: {dn_a} + {dn_b}", 'game': game_info, 'commence': commence,
-                'market': market_name,
-                'book': f"{BOOK_DISPLAY.get(best_a_book, best_a_book)} / {BOOK_DISPLAY.get(best_b_book, best_b_book)}",
-                'type': 'arbitrage',
-                'edge': profit_pct, 'gross_edge': profit_pct,
-                'recommendation': f"Guaranteed {profit_pct}% profit",
-                'odds': best_a_odds,
-                'label1_name': f'{BOOK_DISPLAY.get(best_a_book, best_a_book)}: {dn_a}',
-                'label1_value': format_american(best_a_odds),
-                'label2_name': f'{BOOK_DISPLAY.get(best_b_book, best_b_book)}: {dn_b}',
-                'label2_value': format_american(best_b_odds),
-                'label3_name': 'Guaranteed Profit', 'label3_value': f"+{profit_pct}%",
-                'target_prob': round(total * 100, 1), 'fair_prob': 100.0,
-                'juice_display': f"{round(total * 100, 1)}% combined",
-                'stake_a': stake_a, 'stake_b': stake_b,
-                'affiliate_url_a': affiliate_url(best_a_book),
-                'affiliate_url_b': affiliate_url(best_b_book),
-            })
+        # ---- spreads: same-|line| arbs + cross-line middles ----
+        sp_names = sorted({k[0] for k in sp_keys})
+        if len(sp_names) == 2:
+            a_keys = [k for k in sp_keys if k[0] == sp_names[0]]
+            b_keys = [k for k in sp_keys if k[0] == sp_names[1]]
+            for ka in a_keys:
+                for kb in b_keys:
+                    gap = ka[1] + kb[1]          # window width (−pa, pb)
+                    if abs(gap) < 0.01:
+                        _emit_arb(ka, kb)
+                    elif (gap >= MIDDLE_MIN_GAP
+                          and _is_half_line(ka[1]) and _is_half_line(kb[1])):
+                        _emit_middle(ka, kb, -ka[1], kb[1], kind='spread')
     return arbs
 
 
@@ -2712,6 +2898,7 @@ def scan_markets():
     log_debug(f"Bettable: {', '.join(BOOK_DISPLAY.get(b, b) for b in CO_BETTABLE)}")
     log_debug(f"Consensus: + {', '.join(BOOK_DISPLAY.get(b, b) for b in CONSENSUS_ONLY)} + Kalshi + Polymarket")
     log_debug(f"Strategy: CO book vs weighted consensus (Pinnacle/Kalshi/Poly 3x) | Min edge: {MIN_EDGE_NET}%")
+    log_debug(f"Markets: moneylines + spreads + totals + props | arbs, middles (cost cap {MIDDLE_MAX_COST}%), +EV")
 
     # ---- Exchange data for consensus ----
     log_debug("--- Polymarket sports ---")
@@ -2751,8 +2938,8 @@ def scan_markets():
             except Exception as e:
                 log_debug(f"  {sport} props failed: {e}")
 
-        # ---- Sports: Moneylines ----
-        log_debug("--- Moneylines ---")
+        # ---- Sports: Game lines (moneyline / spread / total) ----
+        log_debug("--- Game Lines (ML / Spread / Total) ---")
         for sport, market, name in GAME_MARKETS:
             if API_KEYS and len(_dead_keys) >= len(API_KEYS) and not providers.ENABLED:
                 log_debug("  All keys exhausted — stopping moneylines")
@@ -2794,8 +2981,16 @@ def scan_markets():
     except Exception as e:
         log_debug(f"  Econ nowcast failed: {e}")
 
-    # Sort: arbs first, then by edge descending
-    all_opps.sort(key=lambda x: (0 if x['type'] == 'arbitrage' else 1, -x['edge']))
+    # Sort: arbs first (by edge desc), then middles (by break-even hit rate asc
+    # -- cheapest middles are the most attractive), then +EV bets by edge desc.
+    def _rank(x):
+        t = x.get('type', '')
+        if t == 'arbitrage':
+            return (0, -x.get('edge', 0.0))
+        if t == 'middle':
+            return (1, x.get('be_pct', 99.0))
+        return (2, -x.get('edge', 0.0))
+    all_opps.sort(key=_rank)
 
     # Log every opportunity to DB for CLV tracking
     try:
@@ -2823,17 +3018,25 @@ def scan_markets():
 # ============================================================
 
 def _market_name_to_api_key(market_name):
-    """Map stored market names (e.g., 'NBA Points') to Odds API market keys."""
+    """Map stored market names (e.g., 'NBA Points') to Odds API market keys.
+    Order matters: spreads before props, 'total bases' before generic 'total'."""
     if not market_name:
         return None
     mn = market_name.lower()
+    # Game lines first (names come from GAME_MARKETS display strings)
+    if 'spread' in mn or 'run line' in mn or 'puck line' in mn: return 'spreads'
+    if 'total base' in mn: return 'player_total_bases'   # MLB prop, not a game total
+    if 'total' in mn: return 'totals'
+    # Player props
+    if 'pass yard' in mn: return 'player_pass_yds'
+    if 'rush yard' in mn: return 'player_rush_yds'
+    if 'reception' in mn: return 'player_receptions'
     if 'point' in mn: return 'player_points'
     if 'rebound' in mn: return 'player_rebounds'
     if 'assist' in mn: return 'player_assists'
     if 'shot' in mn: return 'player_shots_on_goal'
     if 'three' in mn: return 'player_threes'
     if 'strikeout' in mn: return 'player_strikeouts'
-    if 'total base' in mn or 'total bases' in mn: return 'player_total_bases'
     if 'moneyline' in mn or ' ml' in mn: return 'h2h'
     return None
 
@@ -3817,12 +4020,22 @@ def search_odds():
         return jsonify({'error': 'Query too short', 'results': []})
     q_lower = query.lower()
     results = []
-    sport_map = {'nba': 'basketball_nba', 'ncaab': 'basketball_ncaab', 'nhl': 'icehockey_nhl'}
+    # In-season-first: July = MLB / WNBA / MLS / World Cup live; football lights
+    # up in Aug; NBA/NHL/NCAAB return in Oct-Nov. All are searchable year-round.
+    sport_map = {
+        'mlb': 'baseball_mlb', 'wnba': 'basketball_wnba', 'mls': 'soccer_usa_mls',
+        'wcup': 'soccer_fifa_world_cup', 'nfl': 'americanfootball_nfl',
+        'ncaaf': 'americanfootball_ncaaf', 'nba': 'basketball_nba',
+        'nhl': 'icehockey_nhl', 'ncaab': 'basketball_ncaab',
+    }
     if sport_filter != 'all' and sport_filter in sport_map:
         sports = [(sport_filter, sport_map[sport_filter])]
     else:
         sports = list(sport_map.items())
     prop_markets = {
+        'baseball_mlb': [('player_strikeouts', 'Pitcher Ks'), ('player_total_bases', 'Total Bases')],
+        'basketball_wnba': [('player_points', 'Points'), ('player_rebounds', 'Rebounds'), ('player_assists', 'Assists')],
+        'americanfootball_nfl': [('player_pass_yds', 'Pass Yds'), ('player_rush_yds', 'Rush Yds'), ('player_receptions', 'Receptions')],
         'basketball_nba': [('player_points', 'Points'), ('player_rebounds', 'Rebounds')],
         'basketball_ncaab': [('player_points', 'Points'), ('player_rebounds', 'Rebounds')],
         'icehockey_nhl': [('player_points', 'Points'), ('player_shots_on_goal', 'Shots on Goal')],
