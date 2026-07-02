@@ -103,6 +103,7 @@
         .opp.cross { border-left-color: #e040fb; background: #1a1430; }
         .opp.weather { border-left-color: #00bcd4; background: #0a1a2a; }
         .opp.econ { border-left-color: #ff9800; background: #1a1810; }
+        .opp.middle { border-left-color: #2dd4bf; background: #0d1f1e; }
 
         .opp-top {
             display: flex; justify-content: space-between;
@@ -266,6 +267,10 @@
                 <div class="stat-label">Arb</div>
             </div>
             <div class="stat-card">
+                <div class="stat-value" id="totalMiddles" style="color:#2dd4bf">0</div>
+                <div class="stat-label">Middles</div>
+            </div>
+            <div class="stat-card">
                 <div class="stat-value" id="totalCross" style="color:#e040fb">0</div>
                 <div class="stat-label">Cross</div>
             </div>
@@ -329,14 +334,38 @@
         </div>
         <div class="debug-log" id="debugLog"></div>
 
-        <div class="filters" id="filters" style="display:none;">
-            <button class="filter-btn active" onclick="setFilter('all', this)">All</button>
-            <button class="filter-btn" onclick="setFilter('sports', this)">🏀 Sports</button>
-            <button class="filter-btn" onclick="setFilter('arbitrage', this)">💰 Arb</button>
-            <button class="filter-btn" onclick="setFilter('cross_exchange', this)">🔀 Cross-Exch</button>
-            <button class="filter-btn" onclick="setFilter('weather', this)">🌡️ Weather</button>
-            <button class="filter-btn" onclick="setFilter('economic', this)">📊 Econ</button>
-            <button class="filter-btn" onclick="setFilter('strong', this)">⭐ Strong 4%+</button>
+        <div id="filters" style="display:none;">
+            <div class="filters">
+                <button class="filter-btn active" onclick="setFilter('all', this)">All</button>
+                <button class="filter-btn" onclick="setFilter('sports', this)">🏀 Sports +EV</button>
+                <button class="filter-btn" onclick="setFilter('arbitrage', this)">💰 Arb</button>
+                <button class="filter-btn" onclick="setFilter('middle', this)">🎯 Middles</button>
+                <button class="filter-btn" onclick="setFilter('cross_exchange', this)">🔀 Cross-Exch</button>
+                <button class="filter-btn" onclick="setFilter('weather', this)">🌡️ Weather</button>
+                <button class="filter-btn" onclick="setFilter('economic', this)">📊 Econ</button>
+                <button class="filter-btn" onclick="setFilter('strong', this)">⭐ Strong 4%+</button>
+            </div>
+            <div class="filters" style="margin-top:6px;">
+                <span style="font-size:0.7em; color:#666; align-self:center; margin-right:2px;">Market:</span>
+                <button class="filter-btn cls-btn active" onclick="setClassFilter('all', this)">All</button>
+                <button class="filter-btn cls-btn" onclick="setClassFilter('ml', this)">Moneyline</button>
+                <button class="filter-btn cls-btn" onclick="setClassFilter('spread', this)">Spread</button>
+                <button class="filter-btn cls-btn" onclick="setClassFilter('total', this)">Total</button>
+                <button class="filter-btn cls-btn" onclick="setClassFilter('props', this)">Props</button>
+            </div>
+            <div style="display:flex; gap:8px; justify-content:center; align-items:center; margin:8px 15px 0; flex-wrap:wrap;">
+                <input type="text" id="quickFilter" placeholder="Filter by team, player, or book..."
+                    oninput="renderOpps()"
+                    style="flex:1; min-width:180px; max-width:340px; background:#16213e; border:1px solid #333;
+                           border-radius:6px; color:#fff; padding:7px 12px; font-size:0.85em; font-family:inherit;">
+                <select id="sortSelect" onchange="renderOpps()"
+                    style="background:#16213e; border:1px solid #333; border-radius:6px;
+                           color:#fff; padding:7px 10px; font-size:0.8em; font-family:inherit;">
+                    <option value="edge">Sort: Best first</option>
+                    <option value="time">Sort: Start time</option>
+                    <option value="kelly">Sort: Bet size $</option>
+                </select>
+            </div>
         </div>
 
         <div class="opportunities" id="oppContainer">
@@ -349,8 +378,11 @@
 
         <div class="explainer" id="explainer" style="display:none;">
             <strong>How it works:</strong> CO-legal sportsbooks + sharp consensus books + Kalshi + Polymarket are all devigged
-            to find true fair odds. Each book is compared against a <strong>weighted leave-one-out consensus</strong>
-            with Pinnacle/Kalshi/Polymarket at 3× weight.
+            to find true fair odds across <strong>moneylines, spreads, totals, and player props</strong>. Each book is
+            compared against a <strong>weighted leave-one-out consensus</strong> with Pinnacle/Kalshi/Polymarket at 3× weight.
+            <strong>💰 Arbs</strong> are risk-free: complementary legs at the same line whose combined implied is under 100%.
+            <strong>🎯 Middles</strong> are near-free lottery tickets: one leg always wins, and if the number lands in the gap
+            both legs cash — the card shows exactly what a miss costs and the hit rate needed to break even.
             Weather uses a 3-model ensemble forecast (GFS + ECMWF + ICON) for proper uncertainty.
             Economic uses CME FedWatch + Polymarket consensus vs Kalshi.
             <strong>Every opportunity is logged</strong> to the History tab so you can track real performance over time.
@@ -383,6 +415,7 @@
         let scanning = false;
         let allOpps = [];
         let currentFilter = 'all';
+        let currentClass = 'all';
 
         // Persist scan key in localStorage (so you don't re-enter it)
         document.addEventListener('DOMContentLoaded', () => {
@@ -497,9 +530,26 @@
 
         function setFilter(filter, btn) {
             currentFilter = filter;
-            document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.filter-btn:not(.cls-btn)').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
             renderOpps();
+        }
+
+        function setClassFilter(cls, btn) {
+            currentClass = cls;
+            document.querySelectorAll('.cls-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            renderOpps();
+        }
+
+        // Which market class does an opportunity belong to?
+        function marketClass(o) {
+            if (o.type === 'player_prop') return 'props';
+            const m = o.market || '';
+            if (/Total/i.test(m)) return 'total';
+            if (/Spread|Run Line|Puck Line/i.test(m)) return 'spread';
+            if (['game_market', 'arbitrage', 'middle'].includes(o.type)) return 'ml';
+            return 'other';
         }
 
         async function scan() {
@@ -539,7 +589,7 @@
                             document.getElementById('statusText').textContent =
                                 `Last scan: ${data.last_scan} · ${allOpps.length} +EV bets found`;
                             document.getElementById('filters').style.display =
-                                allOpps.length > 0 ? 'flex' : 'none';
+                                allOpps.length > 0 ? 'block' : 'none';
                             document.getElementById('explainer').style.display =
                                 allOpps.length > 0 ? 'block' : 'none';
                             renderOpps();
@@ -556,7 +606,7 @@
 
         function updateStats() {
             const counts = {
-                player_prop: 0, game_market: 0, arbitrage: 0,
+                player_prop: 0, game_market: 0, arbitrage: 0, middle: 0,
                 cross_exchange: 0, weather: 0, economic: 0
             };
             for (const o of allOpps) {
@@ -564,6 +614,7 @@
             }
             document.getElementById('totalSports').textContent = counts.player_prop + counts.game_market;
             document.getElementById('totalArbs').textContent = counts.arbitrage;
+            document.getElementById('totalMiddles').textContent = counts.middle;
             document.getElementById('totalCross').textContent = counts.cross_exchange;
             document.getElementById('totalWeather').textContent = counts.weather;
             document.getElementById('totalEcon').textContent = counts.economic;
@@ -571,20 +622,40 @@
 
         function renderOpps() {
             const container = document.getElementById('oppContainer');
-            let opps = allOpps;
+            let opps = allOpps.slice();
 
             if (currentFilter === 'arbitrage')
-                opps = allOpps.filter(o => o.type === 'arbitrage');
+                opps = opps.filter(o => o.type === 'arbitrage');
+            else if (currentFilter === 'middle')
+                opps = opps.filter(o => o.type === 'middle');
             else if (currentFilter === 'sports')
-                opps = allOpps.filter(o => ['player_prop', 'game_market'].includes(o.type));
+                opps = opps.filter(o => ['player_prop', 'game_market'].includes(o.type));
             else if (currentFilter === 'cross_exchange')
-                opps = allOpps.filter(o => o.type === 'cross_exchange');
+                opps = opps.filter(o => o.type === 'cross_exchange');
             else if (currentFilter === 'weather')
-                opps = allOpps.filter(o => o.type === 'weather');
+                opps = opps.filter(o => o.type === 'weather');
             else if (currentFilter === 'economic')
-                opps = allOpps.filter(o => o.type === 'economic');
+                opps = opps.filter(o => o.type === 'economic');
             else if (currentFilter === 'strong')
-                opps = allOpps.filter(o => o.edge >= 4);
+                opps = opps.filter(o => o.edge >= 4);
+
+            if (currentClass !== 'all')
+                opps = opps.filter(o => marketClass(o) === currentClass);
+
+            const qEl = document.getElementById('quickFilter');
+            const q = qEl ? qEl.value.trim().toLowerCase() : '';
+            if (q)
+                opps = opps.filter(o =>
+                    `${o.player || ''} ${o.game || ''} ${o.book || ''} ${o.market || ''}`
+                        .toLowerCase().includes(q));
+
+            const sortEl = document.getElementById('sortSelect');
+            const sortBy = sortEl ? sortEl.value : 'edge';
+            if (sortBy === 'time')
+                opps.sort((a, b) => (a.commence || '9999').localeCompare(b.commence || '9999'));
+            else if (sortBy === 'kelly')
+                opps.sort((a, b) => (b.kelly_fraction || 0) - (a.kelly_fraction || 0));
+            // 'edge' keeps server order: arbs → middles (cheapest first) → +EV by edge
 
             if (opps.length === 0) {
                 container.innerHTML = `
@@ -597,11 +668,13 @@
 
             container.innerHTML = opps.map(opp => {
                 const isArb = opp.type === 'arbitrage';
+                const isMiddle = opp.type === 'middle';
                 const isCross = opp.type === 'cross_exchange';
                 const isWeather = opp.type === 'weather';
                 const isEcon = opp.type === 'economic';
                 let cls = '', color = '#48bb78', typeIcon = '⚡';
                 if (isArb)       { cls = 'arb';     color = '#ffd700'; typeIcon = '💰'; }
+                else if (isMiddle)  { cls = 'middle';  color = '#2dd4bf'; typeIcon = '🎯'; }
                 else if (isCross)   { cls = 'cross';   color = '#e040fb'; typeIcon = '🔀'; }
                 else if (isWeather) { cls = 'weather'; color = '#00bcd4'; typeIcon = '🌡️'; }
                 else if (isEcon)    { cls = 'econ';    color = '#ff9800'; typeIcon = '📊'; }
@@ -617,12 +690,17 @@
                 const bookBadge = bookBadges[opp.book] || 'badge-book';
 
                 const grossEdge = opp.gross_edge !== undefined ? opp.gross_edge : opp.edge;
-                const grossHtml = (!isArb && grossEdge !== opp.edge)
+                const grossHtml = (!isArb && !isMiddle && grossEdge !== opp.edge)
                     ? `<div class="opp-gross">Gross: +${grossEdge}%</div>` : '';
-                const edgeLabel = isArb ? 'guaranteed' : 'net of vig';
+                let edgeMain = `+${opp.edge}%`;
+                let edgeLabel = isArb ? 'guaranteed' : 'net of vig';
+                if (isMiddle) {
+                    edgeMain = `${opp.be_pct}%`;
+                    edgeLabel = 'break-even hit rate';
+                }
 
                 let fairBarHtml = '';
-                if (!isArb && opp.target_prob && opp.fair_prob) {
+                if (!isArb && !isMiddle && opp.target_prob && opp.fair_prob) {
                     const tp = opp.target_prob;
                     const fp = opp.fair_prob;
                     fairBarHtml = `
@@ -651,21 +729,34 @@
                         <div style="padding:8px 15px; font-size:0.8em; color:#ffd700; background:#12162a; margin:0 15px; border-radius:6px;">
                             💰 Optimal stakes per $100: <strong>$${sa}</strong> on ${leg1} + <strong>$${sb}</strong> on ${leg2}
                         </div>`;
+                } else if (isMiddle) {
+                    const sa = opp.stake_a || 50;
+                    const sb = opp.stake_b || 50;
+                    const leg1 = opp.label1_name || 'Leg 1';
+                    const leg2 = opp.label2_name || 'Leg 2';
+                    stakeHtml = `
+                        <div style="padding:8px 15px; font-size:0.8em; color:#2dd4bf; background:#0a1a18; margin:0 15px; border-radius:6px; line-height:1.6;">
+                            🎯 Window: <strong>${opp.middle_window || ''}</strong><br>
+                            Both hit: <strong style="color:#48bb78;">+${opp.win_pct}%</strong> ·
+                            Otherwise: <strong style="color:#ff6b6b;">−${opp.cost_pct}%</strong> ·
+                            Profitable if window hits > <strong>${opp.be_pct}%</strong> of the time<br>
+                            Stakes per $100: <strong>$${sa}</strong> on ${leg1} + <strong>$${sb}</strong> on ${leg2}
+                        </div>`;
                 }
 
                 let juiceHtml = '';
                 if (opp.juice_display) {
-                    const juiceLabel = isArb ? 'Combined implied' : 'Vig';
+                    const juiceLabel = (isArb || isMiddle) ? 'Combined implied' : 'Vig';
                     juiceHtml = `<span style="color:#888; font-size:0.75em;"> · ${juiceLabel}: ${opp.juice_display}</span>`;
                 }
 
-                const badgeHtml = isArb
+                const badgeHtml = (isArb || isMiddle)
                     ? `<span class="badge badge-market">${opp.book}</span>`
                     : `<span class="badge ${bookBadge}">${opp.book}</span>`;
 
                 // Affiliate buttons
                 let actionRow = '';
-                if (isArb) {
+                if (isArb || isMiddle) {
                     const urlA = opp.affiliate_url_a || '';
                     const urlB = opp.affiliate_url_b || '';
                     if (urlA || urlB) {
@@ -694,7 +785,7 @@
                             </div>
                             <div class="opp-edge-box">
                                 ${grossHtml}
-                                <div class="opp-edge" style="color:${color}">+${opp.edge}%</div>
+                                <div class="opp-edge" style="color:${color}">${edgeMain}</div>
                                 <div class="opp-edge-label">${edgeLabel}</div>
                             </div>
                         </div>
