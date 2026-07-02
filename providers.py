@@ -126,6 +126,47 @@ SPORTS = {
         'props': {'player_points': ['points'], 'player_rebounds': ['rebounds'],
                   'player_assists': ['assists']},
     },
+    'americanfootball_nfl': {
+        'pinnacle_leagues': [],            # discovered dynamically (sport 15)
+        'pinnacle_sport': 15,
+        'pinnacle_league_match': ['nfl'],
+        'pinnacle_league_exclude': ['1st half', '2nd half', 'preseason props'],
+        'dk_groups': [88808],
+        'fd_pages': ['nfl'],
+        'mgm_sport': 11, 'mgm_match': ['nfl'],
+        'kambi_paths': ['american_football/nfl'],
+        'soccer': False,
+        'props': {
+            'player_pass_yds': ['passing yards', 'pass yards', 'pass yds'],
+            'player_rush_yds': ['rushing yards', 'rush yards', 'rush yds'],
+            'player_receptions': ['receptions'],
+        },
+    },
+    'americanfootball_ncaaf': {
+        'pinnacle_leagues': [],            # discovered dynamically (sport 15)
+        'pinnacle_sport': 15,
+        'pinnacle_league_match': ['ncaa', 'college football'],
+        'pinnacle_league_exclude': ['women', '1st half', '2nd half'],
+        'dk_groups': [87637],
+        'fd_pages': ['college-football', 'ncaa-football'],
+        'mgm_sport': 11, 'mgm_match': ['ncaa', 'college'],
+        'kambi_paths': ['american_football/ncaaf',
+                        'american_football/college_football_(ncaaf)'],
+        'soccer': False,
+        'props': {},                        # game lines only for v1
+    },
+    'soccer_usa_mls': {
+        'pinnacle_leagues': [],            # discovered dynamically (sport 29)
+        'pinnacle_sport': 29,
+        'pinnacle_league_match': ['major league soccer', 'mls'],
+        'pinnacle_league_exclude': ['next pro', 'reserve', 'women'],
+        'dk_groups': [89345],
+        'fd_pages': ['mls'],
+        'mgm_sport': 4, 'mgm_match': ['mls', 'major league soccer'],
+        'kambi_paths': ['football/mls', 'football/usa/mls'],
+        'soccer': True,
+        'props': {},                        # game lines only for v1
+    },
 }
 
 PROVIDER_TITLES = {
@@ -287,12 +328,14 @@ def _iso(ts):
 # BOOK GAME container produced by every provider:
 # {'home': str, 'away': str, 'ts': float,
 #  'h2h': [(outcome_name, american)],          # may include 'Draw'
+#  'spreads': [(team_name, signed_point, american)],   # main line only
+#  'totals':  [(side, point, american)],               # side='Over'/'Under'
 #  'props': {market_key: [(player, line, side, american)]}}  side='over'/'under'
 # ============================================================
 
 def _mk_game(home, away, ts):
     return {'home': str(home).strip(), 'away': str(away).strip(), 'ts': ts,
-            'h2h': [], 'props': {}}
+            'h2h': [], 'spreads': [], 'totals': [], 'props': {}}
 
 
 def _add_prop(g, mkey, player, line, side, price):
@@ -300,6 +343,83 @@ def _add_prop(g, mkey, player, line, side, price):
         return
     g['props'].setdefault(mkey, []).append((str(player).strip(), float(line),
                                             side, price))
+
+
+def _add_spread(g, team, point, price):
+    if price is None or point is None or not team:
+        return
+    try:
+        g['spreads'].append((str(team).strip(), float(point), price))
+    except (TypeError, ValueError):
+        pass
+
+
+def _add_total(g, side, point, price):
+    if price is None or point is None or side not in ('Over', 'Under'):
+        return
+    try:
+        g['totals'].append((side, float(point), price))
+    except (TypeError, ValueError):
+        pass
+
+
+# Sub-market labels that must never be mistaken for full-game main lines.
+_PERIOD_BLOCK = ('1st', '2nd', '3rd', '4th', 'first', 'second', 'third',
+                 'fourth', 'half', 'quarter', 'period', 'inning', 'set ',
+                 'team total', 'alternate', 'alternative', ' alt', 'alt ')
+
+
+def _is_period_or_alt(label):
+    l = f' {str(label).lower()} '
+    return any(b in l for b in _PERIOD_BLOCK)
+
+
+def _pair_imbalance(price_a, price_b):
+    """How far a two-sided pair is from balanced juice; used to pick the
+    main line when a book leaks several lines. Main lines price ~ -110/-110."""
+    ia = 1.0 / _american_to_dec(price_a)
+    ib = 1.0 / _american_to_dec(price_b)
+    return abs(ia - ib)
+
+
+def _american_to_dec(a):
+    a = float(a)
+    return 1.0 + (a / 100.0 if a > 0 else 100.0 / abs(a))
+
+
+def _finalize_lines(g):
+    """Keep at most ONE complete main pair per market class per book.
+    Incomplete (one-sided) or duplicated lines are dropped: a half pair
+    poisons the per-book devig and a second line halves every probability."""
+    # --- totals: need Over(x) + Under(x) at the same point ---
+    if g['totals']:
+        by_pt = {}
+        for side, pt, price in g['totals']:
+            by_pt.setdefault(pt, {})[side] = price
+        pairs = [(pt, d['Over'], d['Under'])
+                 for pt, d in by_pt.items() if 'Over' in d and 'Under' in d]
+        if pairs:
+            pt, o, u = min(pairs, key=lambda p: _pair_imbalance(p[1], p[2]))
+            g['totals'] = [('Over', pt, o), ('Under', pt, u)]
+        else:
+            g['totals'] = []
+    # --- spreads: need teamA(-x) + teamB(+x), opposite signs, same |x| ---
+    if g['spreads']:
+        by_team = {}
+        for team, pt, price in g['spreads']:
+            by_team.setdefault(team, []).append((pt, price))
+        teams = list(by_team.keys())
+        best = None
+        if len(teams) >= 2:
+            for pa, ra in by_team[teams[0]]:
+                for pb, rb in by_team[teams[1]]:
+                    if abs(pa + pb) > 0.01:      # must mirror: -3.5 / +3.5
+                        continue
+                    imb = _pair_imbalance(ra, rb)
+                    if best is None or imb < best[0]:
+                        best = (imb, (teams[0], pa, ra), (teams[1], pb, rb))
+        g['spreads'] = [best[1], best[2]] if best else []
+    return g
 
 
 # ---------------- PINNACLE ----------------
@@ -411,6 +531,29 @@ def fetch_pinnacle(sport_key, log=print):
                         g['h2h'].append((g['away'], price))
                     elif desig == 'draw':
                         g['h2h'].append(('Draw', price))
+            elif mid in by_id and mtype in ('spread', 'total') \
+                    and not mk.get('isAlternate'):
+                # Full-game main spread/total lives in the SAME response we
+                # already fetched for moneylines — zero extra HTTP calls.
+                if mtype == 'spread' and cfg.get('soccer'):
+                    continue                     # skip soccer goal handicaps
+                g = by_id[mid]
+                for pr in prices:
+                    desig = str(pr.get('designation') or '')
+                    price = _norm_price(pr.get('price'))
+                    pts = pr.get('points')
+                    if price is None or pts is None:
+                        continue
+                    if mtype == 'spread':
+                        if desig == 'home':
+                            _add_spread(g, g['home'], pts, price)
+                        elif desig == 'away':
+                            _add_spread(g, g['away'], pts, price)
+                    else:
+                        if desig == 'over':
+                            _add_total(g, 'Over', pts, price)
+                        elif desig == 'under':
+                            _add_total(g, 'Under', pts, price)
             elif mid in specials and mtype in ('total', 'moneyline'):
                 sp = specials[mid]
                 if 'player' not in sp['category'] and '(' not in sp['desc']:
@@ -441,8 +584,8 @@ def fetch_pinnacle(sport_key, log=print):
                     elif 'under' in str(desig):
                         _add_prop(pg, mkey, player, line, 'under', price)
 
-        games.update({k: v for k, v in by_id.items()
-                      if v['h2h'] or v['props']})
+        games.update({k: _finalize_lines(v) for k, v in by_id.items()
+                      if v['h2h'] or v['props'] or v['spreads'] or v['totals']})
     out = list(games.values())
     log(f'    pinnacle: {len(out)} games')
     return out
@@ -517,6 +660,13 @@ def fetch_draftkings(sport_key, log=print):
                 continue
             label = str(offer.get('label', '')).lower()
             outs = offer.get('outcomes') or []
+            hay_lines = f'{sub_name} {label}'
+            # Exact-set matching: 'total bases' / 'total rebounds' etc. are
+            # PROPS and must not be swallowed by the game-total branch.
+            _SPREAD_LBL = ('spread', 'point spread', 'run line', 'puck line',
+                           'goal line', 'runline', 'puckline')
+            _TOTAL_LBL = ('total', 'total points', 'total runs', 'total goals',
+                          'game total', 'total games')
             if 'moneyline' in label or (label in ('', 'money line') and
                                         all(o.get('line') is None for o in outs)):
                 if 'moneyline' not in label:
@@ -528,6 +678,20 @@ def fetch_draftkings(sport_key, log=print):
                         continue
                     g['h2h'].append(('Draw' if nm.lower() in ('draw', 'tie')
                                      else nm, price))
+            elif label in _SPREAD_LBL and not _is_period_or_alt(hay_lines):
+                for o in outs:
+                    if o.get('participant') or o.get('participants'):
+                        continue
+                    _add_spread(g, o.get('label', ''), o.get('line'),
+                                _norm_price(o.get('oddsAmerican')))
+            elif label in _TOTAL_LBL and not _is_period_or_alt(hay_lines):
+                for o in outs:
+                    if o.get('participant') or o.get('participants'):
+                        continue
+                    side = str(o.get('label', '')).strip().capitalize()
+                    if side in ('Over', 'Under'):
+                        _add_total(g, side, o.get('line'),
+                                   _norm_price(o.get('oddsAmerican')))
             else:
                 mkey = None
                 hay = f'{sub_name} {label}'.lower()
@@ -576,7 +740,8 @@ def fetch_draftkings(sport_key, log=print):
                   .get('offerCategories') or [])
             for c2 in fc:
                 _ingest_category(c2)
-    out = [g for g in games.values() if g['h2h'] or g['props']]
+    out = [_finalize_lines(g) for g in games.values()
+           if g['h2h'] or g['props'] or g['spreads'] or g['totals']]
     log(f'    draftkings: {len(out)} games')
     return out
 
@@ -644,6 +809,30 @@ def _fd_ingest_markets(markets, games_by_event, cfg):
                 if nm.lower() in ('draw', 'the draw', 'tie'):
                     nm = 'Draw'
                 g['h2h'].append((nm, price))
+        elif (('HANDICAP' in mtype and '2-WAY' in mtype)
+              or mtype in ('RUN_LINE', 'PUCK_LINE')
+              or mname.lower() in ('spread betting', 'spread', 'point spread',
+                                   'run line', 'puck line')) \
+                and 'ALT' not in mtype and 'TEAM' not in mtype \
+                and not _is_period_or_alt(mname) and not soccer:
+            for r in runners:
+                nm = str(r.get('runnerName', '')).strip()
+                # strip a trailing signed handicap or parenthetical without
+                # touching legit digits in names like "76ers" / "49ers"
+                nm = re.sub(r'\s*\([^)]*\)\s*$', '', nm)
+                nm = re.sub(r'\s+[+-]\d+(\.\d+)?\s*$', '', nm).strip()
+                _add_spread(g, nm, r.get('handicap'), _price(r))
+        elif ('TOTAL' in mtype or mname.lower() in
+              ('total points', 'total runs', 'total goals', 'total games',
+               'total match goals', 'over/under')) \
+                and 'ALT' not in mtype and 'TEAM' not in mtype \
+                and not _is_period_or_alt(mname):
+            for r in runners:
+                nm = str(r.get('runnerName', '')).strip().lower()
+                side = 'Over' if nm.startswith('over') else \
+                       'Under' if nm.startswith('under') else None
+                if side:
+                    _add_total(g, side, r.get('handicap'), _price(r))
         elif cfg.get('props'):
             pm = re.match(r'^(.+?)\s*[-–]\s*(.+)$', mname)
             if not pm:
@@ -698,7 +887,8 @@ def fetch_fanduel(sport_key, log=print):
             if ep:
                 _fd_ingest_markets((ep.get('attachments') or {}).get('markets'),
                                    games_by_event, cfg)
-    out = [g for g in games_by_event.values() if g['h2h'] or g['props']]
+    out = [_finalize_lines(g) for g in games_by_event.values()
+           if g['h2h'] or g['props'] or g['spreads'] or g['totals']]
     log(f'    fanduel: {len(out)} games')
     return out
 
@@ -764,27 +954,69 @@ def fetch_betmgm(sport_key, log=print):
         if not home or not away:
             continue
         g = _mk_game(home, away, _parse_ts(fx.get('startDate')))
+        _ML_NAMES = ('money line', 'moneyline', 'result', 'match result',
+                     '2way - match')
+        _SP_NAMES = ('spread', 'point spread', 'handicap', 'run line',
+                     'puck line')
+        _TT_NAMES = ('totals', 'total', 'over/under', 'total points',
+                     'total runs', 'total goals', 'totals: over/under')
+
+        def _res_price(res):
+            price = res.get('americanOdds')
+            if price is None:
+                price = _dec_to_american(res.get('odds'))
+            return _norm_price(price)
+
+        def _res_line(res, nm):
+            attr = res.get('attr')
+            try:
+                return float(str(attr).replace('+', ''))
+            except (TypeError, ValueError):
+                pass
+            m = re.search(r'([+-]\d+(?:\.\d+)?)\s*$', nm)   # signed only —
+            if m:                                           # spares "76ers"
+                return float(m.group(1))
+            m = re.search(r'(\d+(?:\.\d+)?)\s*$', nm)
+            return float(m.group(1)) if m else None
+
         for game in (fx.get('games') or []):
             gname = str((game.get('name') or {}).get('value', '')).lower()
-            if gname not in ('money line', 'moneyline', 'result',
-                             'match result', '2way - match'):
+            if _is_period_or_alt(gname):
                 continue
-            for res in (game.get('results') or []):
-                price = res.get('americanOdds')
-                if price is None:
-                    price = _dec_to_american(res.get('odds'))
-                price = _norm_price(price)
-                nm = str((res.get('name') or {}).get('value', '')).strip()
-                if price is None or not nm:
-                    continue
-                low = nm.lower()
-                if low in ('x', 'draw', 'tie'):
-                    nm = 'Draw'
-                g['h2h'].append((nm, price))
-            if g['h2h']:
-                break
-        if g['h2h']:
-            out.append(g)
+            results = game.get('results') or []
+            if gname in _ML_NAMES and not g['h2h']:
+                for res in results:
+                    price = _res_price(res)
+                    nm = str((res.get('name') or {}).get('value', '')).strip()
+                    if price is None or not nm:
+                        continue
+                    low = nm.lower()
+                    if low in ('x', 'draw', 'tie'):
+                        nm = 'Draw'
+                    g['h2h'].append((nm, price))
+            elif gname in _SP_NAMES and not g['spreads'] \
+                    and not cfg.get('soccer'):
+                for res in results:
+                    price = _res_price(res)
+                    nm = str((res.get('name') or {}).get('value', '')).strip()
+                    if price is None or not nm:
+                        continue
+                    line = _res_line(res, nm)
+                    team = re.sub(r'\s*[+-]\d+(?:\.\d+)?\s*$', '', nm).strip()
+                    _add_spread(g, team or nm, line, price)
+            elif gname in _TT_NAMES and not g['totals']:
+                for res in results:
+                    price = _res_price(res)
+                    nm = str((res.get('name') or {}).get('value', '')).strip()
+                    if price is None or not nm:
+                        continue
+                    low = nm.lower()
+                    side = 'Over' if low.startswith('o') else \
+                           'Under' if low.startswith('u') else None
+                    if side:
+                        _add_total(g, side, _res_line(res, nm), price)
+        if g['h2h'] or g['spreads'] or g['totals']:
+            out.append(_finalize_lines(g))
     log(f'    betmgm: {len(out)} games')
     return out
 
@@ -814,6 +1046,53 @@ def fetch_betrivers(sport_key, log=print):
         for bo in (wrap.get('betOffers') or []):
             crit = str((bo.get('criterion') or {}).get('label', '')).lower()
             btype = str((bo.get('betOfferType') or {}).get('name', '')).lower()
+            outcomes = bo.get('outcomes') or []
+
+            def _kambi_price(oc):
+                return _dec_to_american((oc.get('odds') or 0) / 1000.0)
+
+            def _kambi_line(oc):
+                ln = oc.get('line')
+                return ln / 1000.0 if isinstance(ln, (int, float)) else None
+
+            _SUB_BLOCK = ('corner', 'card', 'booking', 'shot', 'team',
+                          'player', 'asian', '3-way', 'three way')
+
+            # ---- main spread (Kambi 'Handicap' offers) ----
+            if btype == 'handicap' and not g['spreads'] \
+                    and not cfg.get('soccer') \
+                    and not _is_period_or_alt(crit) \
+                    and not any(b in crit for b in _SUB_BLOCK):
+                for oc in outcomes:
+                    price = _kambi_price(oc)
+                    line = _kambi_line(oc)
+                    if price is None or line is None:
+                        continue
+                    otype = str(oc.get('type', ''))
+                    if otype == 'OT_ONE':
+                        _add_spread(g, home, line, price)
+                    elif otype == 'OT_TWO':
+                        _add_spread(g, away, line, price)
+                continue
+
+            # ---- main total (Kambi 'Over/Under' offers) ----
+            if btype == 'over/under' and not g['totals'] \
+                    and not _is_period_or_alt(crit) \
+                    and not any(b in crit for b in _SUB_BLOCK):
+                for oc in outcomes:
+                    price = _kambi_price(oc)
+                    line = _kambi_line(oc)
+                    if price is None or line is None:
+                        continue
+                    otype = str(oc.get('type', ''))
+                    if otype == 'OT_OVER':
+                        _add_total(g, 'Over', line, price)
+                    elif otype == 'OT_UNDER':
+                        _add_total(g, 'Under', line, price)
+                continue
+
+            if g['h2h']:
+                continue
             # Many sub-markets (corners, cards, totals, handicaps) reuse the
             # exact OT_ONE/OT_CROSS/OT_TWO 1X2 structure, so structure alone
             # can't distinguish them. Reject anything whose label names a
@@ -835,7 +1114,7 @@ def fetch_betrivers(sport_key, log=print):
                 or (btype == 'match' and not crit))
             if not is_match_result:
                 continue
-            for oc in (bo.get('outcomes') or []):
+            for oc in outcomes:
                 price = _dec_to_american((oc.get('odds') or 0) / 1000.0)
                 if price is None:
                     continue
@@ -850,10 +1129,8 @@ def fetch_betrivers(sport_key, log=print):
                     nm = oc.get('participant') or oc.get('label', '')
                     if nm:
                         g['h2h'].append((str(nm), price))
-            if g['h2h']:
-                break
-        if g['h2h']:
-            out.append(g)
+        if g['h2h'] or g['spreads'] or g['totals']:
+            out.append(_finalize_lines(g))
     log(f'    betrivers: {len(out)} games')
     return out
 
@@ -956,9 +1233,16 @@ def _merge_to_v4(sport_key, per_book, log=print):
                 canon = name_map.get(_team_key(nm, soccer))
                 if canon:
                     h2h.append((canon, price))
-            entry = b['books'].setdefault(book, {'h2h': {}, 'props': {}})
+            entry = b['books'].setdefault(book, {'h2h': {}, 'spreads': {},
+                                                 'totals': {}, 'props': {}})
             for nm, price in h2h:
                 entry['h2h'][nm] = price
+            for team, pt, price in g.get('spreads', []):
+                canon = name_map.get(_team_key(team, soccer))
+                if canon:
+                    entry['spreads'][(canon, pt)] = price
+            for side, pt, price in g.get('totals', []):
+                entry['totals'][(side, pt)] = price
             for mkey, rows in g['props'].items():
                 pm = entry['props'].setdefault(mkey, {})
                 for player, line, side, price in rows:
@@ -981,6 +1265,14 @@ def _merge_to_v4(sport_key, per_book, log=print):
             if len(entry['h2h']) >= 2:
                 markets.append({'key': 'h2h', 'outcomes': [
                     {'name': nm, 'price': pr} for nm, pr in entry['h2h'].items()]})
+            if len(entry['spreads']) >= 2:
+                markets.append({'key': 'spreads', 'outcomes': [
+                    {'name': nm, 'point': pt, 'price': pr}
+                    for (nm, pt), pr in entry['spreads'].items()]})
+            if len(entry['totals']) >= 2:
+                markets.append({'key': 'totals', 'outcomes': [
+                    {'name': side, 'point': pt, 'price': pr}
+                    for (side, pt), pr in entry['totals'].items()]})
             for mkey, players in entry['props'].items():
                 outs = []
                 for (_pk, line), rec in players.items():
