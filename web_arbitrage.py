@@ -97,6 +97,7 @@ MAX_EDGE_POINT = float(os.environ.get('MAX_EDGE_POINT', '8'))
 # A 2-pt NFL total middle hits ~8-12%; break-even ≈ cost, so 3% is generous.
 MIDDLE_MAX_COST = float(os.environ.get('MIDDLE_MAX_COST', '3.0'))
 MIDDLE_MIN_GAP = float(os.environ.get('MIDDLE_MIN_GAP', '1.0'))
+WEATHER_MIN_EDGE = float(os.environ.get('WEATHER_MIN_EDGE', '5'))  # fee-adjusted
 
 # ============================================================
 # AFFILIATE LINKS (set these env vars to activate; left blank = no link shown)
@@ -260,6 +261,8 @@ def init_db():
             for col_sql in [
                 "ALTER TABLE opportunities ADD COLUMN sport_key TEXT",
                 "ALTER TABLE opportunities ADD COLUMN event_id TEXT",
+                "ALTER TABLE opportunities ADD COLUMN settled_at TEXT",
+                "ALTER TABLE opportunities ADD COLUMN pnl REAL",
                 "ALTER TABLE opportunities ADD COLUMN clv_captured_at TEXT",
             ]:
                 try:
@@ -519,6 +522,94 @@ NBA_TEAMS = {
     'kings': 'Sacramento Kings', 'spurs': 'San Antonio Spurs', 'raptors': 'Toronto Raptors',
     'jazz': 'Utah Jazz', 'wizards': 'Washington Wizards',
 }
+
+# Kalshi ticker team codes -> full names as sportsbooks use them.
+MLB_CODES = {
+    'AZ': 'Arizona Diamondbacks', 'ARI': 'Arizona Diamondbacks', 'ATL': 'Atlanta Braves',
+    'BAL': 'Baltimore Orioles', 'BOS': 'Boston Red Sox', 'CHC': 'Chicago Cubs',
+    'CWS': 'Chicago White Sox', 'CIN': 'Cincinnati Reds', 'CLE': 'Cleveland Guardians',
+    'COL': 'Colorado Rockies', 'DET': 'Detroit Tigers', 'HOU': 'Houston Astros',
+    'KC': 'Kansas City Royals', 'LAA': 'Los Angeles Angels', 'LAD': 'Los Angeles Dodgers',
+    'MIA': 'Miami Marlins', 'MIL': 'Milwaukee Brewers', 'MIN': 'Minnesota Twins',
+    'NYM': 'New York Mets', 'NYY': 'New York Yankees', 'ATH': 'Athletics',
+    'OAK': 'Athletics', 'PHI': 'Philadelphia Phillies', 'PIT': 'Pittsburgh Pirates',
+    'SD': 'San Diego Padres', 'SEA': 'Seattle Mariners', 'SF': 'San Francisco Giants',
+    'STL': 'St. Louis Cardinals', 'TB': 'Tampa Bay Rays', 'TEX': 'Texas Rangers',
+    'TOR': 'Toronto Blue Jays', 'WSH': 'Washington Nationals',
+}
+WNBA_CODES = {
+    'ATL': 'Atlanta Dream', 'CHI': 'Chicago Sky', 'CONN': 'Connecticut Sun',
+    'CON': 'Connecticut Sun', 'DAL': 'Dallas Wings', 'GSV': 'Golden State Valkyries',
+    'GS': 'Golden State Valkyries', 'IND': 'Indiana Fever', 'LA': 'Los Angeles Sparks',
+    'LV': 'Las Vegas Aces', 'MIN': 'Minnesota Lynx', 'NY': 'New York Liberty',
+    'PHX': 'Phoenix Mercury', 'POR': 'Portland Fire', 'SEA': 'Seattle Storm',
+    'TOR': 'Toronto Tempo', 'WSH': 'Washington Mystics', 'WAS': 'Washington Mystics',
+}
+NBA_CODES = {
+    'ATL': 'Atlanta Hawks', 'BOS': 'Boston Celtics', 'BKN': 'Brooklyn Nets',
+    'CHA': 'Charlotte Hornets', 'CHI': 'Chicago Bulls', 'CLE': 'Cleveland Cavaliers',
+    'DAL': 'Dallas Mavericks', 'DEN': 'Denver Nuggets', 'DET': 'Detroit Pistons',
+    'GSW': 'Golden State Warriors', 'GS': 'Golden State Warriors', 'HOU': 'Houston Rockets',
+    'IND': 'Indiana Pacers', 'LAC': 'Los Angeles Clippers', 'LAL': 'Los Angeles Lakers',
+    'MEM': 'Memphis Grizzlies', 'MIA': 'Miami Heat', 'MIL': 'Milwaukee Bucks',
+    'MIN': 'Minnesota Timberwolves', 'NOP': 'New Orleans Pelicans', 'NO': 'New Orleans Pelicans',
+    'NYK': 'New York Knicks', 'NY': 'New York Knicks', 'OKC': 'Oklahoma City Thunder',
+    'ORL': 'Orlando Magic', 'PHI': 'Philadelphia 76ers', 'PHX': 'Phoenix Suns',
+    'POR': 'Portland Trail Blazers', 'SAC': 'Sacramento Kings', 'SAS': 'San Antonio Spurs',
+    'SA': 'San Antonio Spurs', 'TOR': 'Toronto Raptors', 'UTA': 'Utah Jazz',
+    'WAS': 'Washington Wizards', 'WSH': 'Washington Wizards',
+}
+NHL_CODES = {
+    'ANA': 'Anaheim Ducks', 'BOS': 'Boston Bruins', 'BUF': 'Buffalo Sabres',
+    'CGY': 'Calgary Flames', 'CAR': 'Carolina Hurricanes', 'CHI': 'Chicago Blackhawks',
+    'COL': 'Colorado Avalanche', 'CBJ': 'Columbus Blue Jackets', 'DAL': 'Dallas Stars',
+    'DET': 'Detroit Red Wings', 'EDM': 'Edmonton Oilers', 'FLA': 'Florida Panthers',
+    'LAK': 'Los Angeles Kings', 'LA': 'Los Angeles Kings', 'MIN': 'Minnesota Wild',
+    'MTL': 'Montreal Canadiens', 'NSH': 'Nashville Predators', 'NJD': 'New Jersey Devils',
+    'NJ': 'New Jersey Devils', 'NYI': 'New York Islanders', 'NYR': 'New York Rangers',
+    'OTT': 'Ottawa Senators', 'PHI': 'Philadelphia Flyers', 'PIT': 'Pittsburgh Penguins',
+    'SJS': 'San Jose Sharks', 'SJ': 'San Jose Sharks', 'SEA': 'Seattle Kraken',
+    'STL': 'St. Louis Blues', 'TBL': 'Tampa Bay Lightning', 'TB': 'Tampa Bay Lightning',
+    'TOR': 'Toronto Maple Leafs', 'UTA': 'Utah Mammoth', 'VAN': 'Vancouver Canucks',
+    'VGK': 'Vegas Golden Knights', 'WSH': 'Washington Capitals', 'WPG': 'Winnipeg Jets',
+}
+NFL_CODES = {
+    'ARI': 'Arizona Cardinals', 'ATL': 'Atlanta Falcons', 'BAL': 'Baltimore Ravens',
+    'BUF': 'Buffalo Bills', 'CAR': 'Carolina Panthers', 'CHI': 'Chicago Bears',
+    'CIN': 'Cincinnati Bengals', 'CLE': 'Cleveland Browns', 'DAL': 'Dallas Cowboys',
+    'DEN': 'Denver Broncos', 'DET': 'Detroit Lions', 'GB': 'Green Bay Packers',
+    'HOU': 'Houston Texans', 'IND': 'Indianapolis Colts', 'JAX': 'Jacksonville Jaguars',
+    'KC': 'Kansas City Chiefs', 'LV': 'Las Vegas Raiders', 'LAC': 'Los Angeles Chargers',
+    'LAR': 'Los Angeles Rams', 'MIA': 'Miami Dolphins', 'MIN': 'Minnesota Vikings',
+    'NE': 'New England Patriots', 'NO': 'New Orleans Saints', 'NYG': 'New York Giants',
+    'NYJ': 'New York Jets', 'PHI': 'Philadelphia Eagles', 'PIT': 'Pittsburgh Steelers',
+    'SF': 'San Francisco 49ers', 'SEA': 'Seattle Seahawks', 'TB': 'Tampa Bay Buccaneers',
+    'TEN': 'Tennessee Titans', 'WSH': 'Washington Commanders', 'WAS': 'Washington Commanders',
+}
+
+# Kalshi single-game moneyline series (ticker suffix = winning team code).
+# Nonexistent series simply return zero markets, so candidates are cheap.
+KALSHI_GAME_SERIES = [
+    ('KXMLBGAME', MLB_CODES), ('KXWNBAGAME', WNBA_CODES),
+    ('KXNBAGAME', NBA_CODES), ('KXNHLGAME', NHL_CODES), ('KXNFLGAME', NFL_CODES),
+]
+# Kalshi player-prop series -> Odds-API market key. Sub-title format: "Name: 20+".
+KALSHI_PROP_SERIES = [
+    ('KXNBAPTS', 'player_points'), ('KXNBAREB', 'player_rebounds'),
+    ('KXNBAAST', 'player_assists'), ('KXNBA3PT', 'player_threes'),
+    ('KXWNBAPTS', 'player_points'), ('KXWNBAREB', 'player_rebounds'),
+    ('KXWNBAAST', 'player_assists'), ('KXNHLSOG', 'player_shots_on_goal'),
+]
+
+def kalshi_fee_pct(price_prob):
+    """Kalshi taker fee as % of $1 notional at execution price p:
+    fee = ceil(7 * p * (1-p)) cents per contract. ~1.75% at p=0.50."""
+    try:
+        p = min(max(float(price_prob), 0.01), 0.99)
+    except (TypeError, ValueError):
+        return 1.75
+    return math.ceil(round(7.0 * p * (1.0 - p) * 100, 6)) / 100.0
+
 
 POLYMARKET_API = "https://gamma-api.polymarket.com"
 OPEN_METEO_API = "https://api.open-meteo.com/v1/forecast"
@@ -880,141 +971,111 @@ def fetch_event_odds(sport, event_id, market):
 # KALSHI SPORTS FETCH (populates kalshi_props + kalshi_games)
 # ============================================================
 
+def _kalshi_series_markets(series, log, max_pages=2):
+    """Open singles for one Kalshi series; MVE parlay combos excluded."""
+    out, cursor = [], ''
+    for _ in range(max_pages):
+        params = {'status': 'open', 'limit': 200, 'series_ticker': series,
+                  'mve_filter': 'exclude'}
+        if cursor:
+            params['cursor'] = cursor
+        try:
+            resp = kalshi_get(f"{KALSHI_API}/markets", params=params, timeout=20)
+        except Exception as e:
+            log(f"  Kalshi {series}: {str(e)[:60]}")
+            return out
+        if resp.status_code == 429:
+            time.sleep(3)
+            resp = kalshi_get(f"{KALSHI_API}/markets", params=params, timeout=20)
+        if resp.status_code != 200:
+            log(f"  Kalshi {series}: HTTP {resp.status_code}")
+            return out
+        data = resp.json()
+        out.extend(data.get('markets', []) or [])
+        cursor = data.get('cursor', '')
+        if not cursor:
+            break
+        time.sleep(0.35)
+    return out
+
+
 def fetch_kalshi_sports(log_fn=None):
-    """Fetch Kalshi sports markets (props + game outcomes)."""
+    """Kalshi sports consensus via dedicated series (KXMLBGAME, KXNBAPTS, ...).
+
+    The generic /markets feed is now dominated by auto-generated multivariate
+    parlay combos (KXMVE*), so title-regex crawling finds nothing. Instead we
+    query each single-game/prop series directly with mve_filter=exclude and
+    parse the structured ticker + sub_title."""
     def log(msg):
         if log_fn: log_fn(msg)
 
     result = {'props': {}, 'games': {}}
-    total_parsed = 0
-    total_fetched = 0
-    games_matched = 0
+    now = datetime.now(timezone.utc)
+    horizon = now + timedelta(hours=60)
+    games_matched, games_close = 0, {}
 
-    try:
-        cursor = ''
-        all_props = []
-
-        for page in range(20):
-            params = {'status': 'open', 'limit': 200}
-            if cursor:
-                params['cursor'] = cursor
-
-            resp = kalshi_get(f"{KALSHI_API}/markets", params=params, timeout=20)
-            if resp.status_code == 429:
-                log(f"  Kalshi API: rate limited on page {page+1}, waiting 3s...")
-                time.sleep(3)
-                resp = kalshi_get(f"{KALSHI_API}/markets", params=params, timeout=20)
-                if resp.status_code == 429:
-                    log(f"  Kalshi API: still rate limited, using {total_fetched} markets so far")
-                    break
-            if resp.status_code != 200:
-                log(f"  Kalshi API: HTTP {resp.status_code}")
-                break
-
-            data = resp.json()
-            markets = data.get('markets', [])
-            total_fetched += len(markets)
-            if not markets:
-                break
-
-            for mkt in markets:
-                title = (mkt.get('title', '') or '').lower()
-                subtitle = (mkt.get('subtitle', '') or '').lower()
-                full = f"{title} {subtitle}"
-
-                if ',' in title:
-                    continue
-
-                futures_kws = ['championship', 'champion', 'title', 'finals', 'playoff',
-                               'season', 'mvp', 'award', 'division', 'conference']
-                is_futures = any(kw in title for kw in futures_kws)
-                if not is_futures:
-                    game_match = re.search(
-                        r'(?:will\s+)?(?:the\s+)?(.+?)\s+(?:wins?|beats?|defeats?)\s+(?:the\s+)?(.+)',
-                        title, re.IGNORECASE)
-                    if game_match:
-                        team_str = game_match.group(1).strip().lower()
-                        opponent_str = game_match.group(2).strip().lower()
-                        has_opponent = any(key in opponent_str for key in NBA_TEAMS.keys())
-                        if has_opponent:
-                            yb, ya, lp = kalshi_prices(mkt)
-                            if yb > 0 or ya > 0 or lp > 0:
-                                mid = (((yb + ya) / 2 if yb > 0 and ya > 0 else (yb or ya or lp))) / 100.0
-                                if 0.05 < mid < 0.95:
-                                    for key, full_name in NBA_TEAMS.items():
-                                        if key in team_str:
-                                            result['games'][full_name] = mid
-                                            games_matched += 1
-                                            break
-
-                # Loose filter: any stat keyword OR compact "N+" OR number-next-to-stat format.
-                # Better to over-include and let regex/LLM sort it out.
-                stat_kws = ['point', 'rebound', 'assist', 'three', '3-pointer', '3pt',
-                            'shot', 'goal', 'steal', 'block', 'turnover', 'sog', 'pts',
-                            'reb', 'ast', 'strikeout', 'total base', 'pitcher']
-                has_stat = any(kw in full for kw in stat_kws)
-                has_numplus = bool(re.search(r'\d+\+', full))  # anything like "25+"
-                has_compact = bool(re.search(r':\s*\d+\+?', full))  # "Player: 25+"
-                has_over_under = any(kw in full for kw in ['over', 'under', 'o/u'])
-                if has_stat or has_numplus or has_compact or has_over_under:
-                    all_props.append(mkt)
-
-            cursor = data.get('cursor', '')
-            if not cursor:
-                break
-            time.sleep(1.0)
-
-        log(f"  Kalshi: scanned {total_fetched} open markets, {len(all_props)} look like player props")
-
-        unparsed = []
-        for mkt in all_props:
-            parsed = parse_kalshi_prop(mkt)
-            if parsed:
-                player, market_type, line, over_prob = parsed
-                norm = normalize_player_name(player)
-                if norm not in result["props"]:
-                    result["props"][norm] = {}
-                if market_type not in result["props"][norm]:
-                    result["props"][norm][market_type] = {}
-                result["props"][norm][market_type][line] = over_prob
-                total_parsed += 1
-            else:
-                unparsed.append(mkt)
-
-        regex_parsed = total_parsed
-        log(f"  Kalshi regex: {regex_parsed} parsed, {len(unparsed)} unparsed")
-
-        # LLM fallback for anything regex couldn't handle
-        if LLM_PARSER_ENABLED and unparsed:
+    # ---- single-game moneylines ----
+    for series, codes in KALSHI_GAME_SERIES:
+        mkts = _kalshi_series_markets(series, log)
+        hit = 0
+        for mkt in mkts:
+            tick = mkt.get('ticker', '') or ''
+            parts = tick.rsplit('-', 1)
+            if len(parts) != 2:
+                continue
+            code = parts[1].strip().upper()
+            full = codes.get(code)
+            if not full:
+                continue
+            ct = mkt.get('close_time', '') or ''
             try:
-                llm_results = parse_kalshi_props_llm(unparsed, log_fn=log)
-                for player, market_type, line, over_prob in llm_results:
-                    norm = normalize_player_name(player)
-                    if norm not in result["props"]:
-                        result["props"][norm] = {}
-                    if market_type not in result["props"][norm]:
-                        result["props"][norm][market_type] = {}
-                    # Only add if regex didn't already get this player/line
-                    if line not in result["props"][norm].get(market_type, {}):
-                        result["props"][norm][market_type][line] = over_prob
-                        total_parsed += 1
-                log(f"  Kalshi LLM: recovered {total_parsed - regex_parsed} additional props")
-            except Exception as e:
-                log(f"  Kalshi LLM error: {e}")
-        elif unparsed and not LLM_PARSER_ENABLED:
-            log(f"  Kalshi LLM: skipped ({len(unparsed)} unparsed, set ANTHROPIC_API_KEY to enable)")
+                close_dt = datetime.fromisoformat(ct.replace('Z', '+00:00'))
+            except Exception:
+                continue
+            if not (now < close_dt < horizon):
+                continue                      # only near-term games; avoids stale/futures
+            yb, ya, lp = kalshi_prices(mkt)
+            mid = (((yb + ya) / 2) if yb > 0 and ya > 0 else (yb or ya or lp)) / 100.0
+            if not (0.03 < mid < 0.97):
+                continue
+            prev = games_close.get(full)
+            if prev is None or close_dt < prev:   # earliest game per team (doubleheaders)
+                games_close[full] = close_dt
+                result['games'][full] = mid
+                hit += 1
+        if mkts or hit:
+            log(f"  Kalshi {series}: {len(mkts)} singles, {hit} priced games")
+        time.sleep(0.35)
 
-        log(f"  Kalshi: {total_parsed} total player props for {len(result['props'])} players")
-        log(f"  Kalshi: {games_matched} game outcomes matched for {len(result['games'])} teams")
+    games_matched = len(result['games'])
 
-        if total_parsed == 0 and all_props:
-            log(f"  Kalshi: 0 parsed from {len(all_props)} candidates — sample titles:")
-            for m in all_props[:3]:
-                log(f"    ✗ '{m.get('title','?')}'")
+    # ---- player props ("Name: 20+" sub-titles) ----
+    total_parsed = 0
+    for series, market_type in KALSHI_PROP_SERIES:
+        mkts = _kalshi_series_markets(series, log, max_pages=3)
+        hit = 0
+        for mkt in mkts:
+            sub = (mkt.get('yes_sub_title') or mkt.get('subtitle') or
+                   mkt.get('title') or '').strip()
+            m = re.match(r"^(.+?):\s*(\d+)\+\s*$", sub)
+            if not m:
+                continue
+            player, thr = m.group(1).strip(), int(m.group(2))
+            yb, ya, lp = kalshi_prices(mkt)
+            mid = (((yb + ya) / 2) if yb > 0 and ya > 0 else (yb or ya or lp)) / 100.0
+            if not (0.03 < mid < 0.97) or not (2 < len(player) < 40):
+                continue
+            line = thr - 0.5                  # "20+" settles like Over 19.5
+            norm = normalize_player_name(player)
+            result['props'].setdefault(norm, {}).setdefault(market_type, {})[line] = mid
+            hit += 1
+            total_parsed += 1
+        if mkts or hit:
+            log(f"  Kalshi {series}: {len(mkts)} singles, {hit} prop lines")
+        time.sleep(0.35)
 
-    except Exception as e:
-        log(f"  Kalshi error: {e}")
-
+    log(f"  Kalshi: {total_parsed} player prop lines for {len(result['props'])} players")
+    log(f"  Kalshi: {games_matched} game moneylines priced")
     return result
 
 # ============================================================
@@ -1022,134 +1083,107 @@ def fetch_kalshi_sports(log_fn=None):
 # ============================================================
 
 def fetch_polymarket_sports(log_fn=None):
+    """Polymarket sports consensus. Fetches highest-volume active markets
+    (default ordering buries sports), then matches two shapes:
+      * two-outcome team markets: outcomes = ["Yankees", "Red Sox"]
+      * question-style singles:   "Will the Yankees beat the Red Sox ...?"
+    Logs sample questions whenever nothing matches so drift is visible."""
     def log(msg):
         if log_fn: log_fn(msg)
 
     result = {'games': {}, 'props': {}}
+    all_teams = {}
+    for d in (NBA_TEAMS,):
+        all_teams.update(d)
+    for codes in (MLB_CODES, WNBA_CODES, NHL_CODES, NFL_CODES):
+        for full in codes.values():
+            nick = full.rsplit(' ', 1)[-1].lower()
+            all_teams[nick] = full
+            all_teams[full.lower()] = full
+
+    markets, samples = [], []
     try:
-        resp = requests.get(f"{POLYMARKET_API}/markets",
-            params={'closed': 'false', 'limit': 500, 'active': 'true', 'tag': 'sports'},
-            timeout=15)
-
-        if resp.status_code != 200:
+        for offset in (0, 100, 200):
             resp = requests.get(f"{POLYMARKET_API}/markets",
-                params={'closed': 'false', 'limit': 500, 'active': 'true'},
+                params={'closed': 'false', 'active': 'true', 'limit': 100,
+                        'offset': offset, 'order': 'volume24hr',
+                        'ascending': 'false'},
                 timeout=15)
+            if resp.status_code != 200:
+                log(f"  Polymarket API: HTTP {resp.status_code}")
+                break
+            page = resp.json() if isinstance(resp.json(), list) else []
+            if not page:
+                break
+            markets.extend(page)
 
-        if resp.status_code != 200:
-            log(f"  Polymarket API: HTTP {resp.status_code}")
-            return result
-
-        markets = resp.json() if isinstance(resp.json(), list) else []
         sports_count = 0
         candidates = 0
-
         for m in markets:
             q = (m.get('question', '') or '').strip()
             q_low = q.lower()
-
             outcomes = m.get('outcomes', '[]')
             prices = m.get('outcomePrices', '[]')
             if isinstance(outcomes, str):
                 try:
                     outcomes = json.loads(outcomes)
                     prices = json.loads(prices)
-                except:
+                except Exception:
                     continue
             if len(outcomes) < 2 or len(prices) < 2:
                 continue
             try:
-                yes_price = float(prices[0])
-            except:
+                p0 = float(prices[0]); p1 = float(prices[1])
+            except Exception:
                 continue
-            if yes_price <= 0.02 or yes_price >= 0.98:
-                continue
+            if len(samples) < 3:
+                samples.append(q[:70])
 
             is_futures = any(kw in q_low for kw in [
-                'championship', 'champion', 'title', 'finals mvp', 'playoff mvp',
-                'season', 'mvp', 'roty', 'dpoy', 'award', 'division', 'conference',
-                'win the nba', 'win the nfl', 'win the nhl', 'win the mlb',
-                'first round', 'draft', 'rookie of', 'coach of',
-            ])
+                'championship', 'champion', ' title', 'finals mvp', 'season',
+                'mvp', 'award', 'division', 'conference', 'draft', 'rookie of',
+                'coach of', 'win the world series', 'make the playoffs'])
             if is_futures:
                 continue
 
-            # Candidate: mentions any team we know about
-            has_team_ref = any(key in q_low for key in NBA_TEAMS.keys())
-            if not has_team_ref and not any(kw in q_low for kw in [
-                'points', 'rebounds', 'assists', 'score', 'record', 'goal']):
-                continue
-            candidates += 1
-
-            # -- GAME OUTCOMES --
-            # Try multiple phrasings Polymarket uses
-            game_patterns = [
-                # "Will X beat/win vs/defeat Y"
-                r'(?:will|do|does)\s+(?:the\s+)?(.+?)\s+(?:win|beat|defeat|top)\s+(?:vs\.?\s+|against\s+|the\s+)?(.+?)[\?\.]?$',
-                # "X vs Y - X winner" style
-                r'(?:the\s+)?(.+?)\s+vs\.?\s+(?:the\s+)?(.+?)\s*[-–—]',
-                # "X @ Y" style
-                r'(?:the\s+)?(.+?)\s+@\s+(?:the\s+)?(.+?)(?:[\?\.]|$)',
-            ]
-            matched_game = False
-            for pat in game_patterns:
-                gm = re.search(pat, q_low, re.IGNORECASE)
-                if not gm:
-                    continue
-                team_str = gm.group(1).strip()
-                opp_str = gm.group(2).strip()
-                home_team = None
-                for key, full_name in NBA_TEAMS.items():
-                    if key in team_str:
-                        home_team = full_name
-                        break
-                has_opp = any(key in opp_str for key in NBA_TEAMS.keys())
-                if home_team and has_opp:
-                    result['games'][home_team] = yes_price
+            # Shape A: outcomes ARE team names (moneyline market)
+            o0 = str(outcomes[0]).strip().lower()
+            o1 = str(outcomes[1]).strip().lower()
+            f0 = all_teams.get(o0)
+            f1 = all_teams.get(o1)
+            if f0 and f1 and f0 != f1:
+                candidates += 1
+                if 0.02 < p0 < 0.98:
+                    result['games'][f0] = p0
                     sports_count += 1
-                    matched_game = True
-                    break
-            if matched_game:
+                if 0.02 < p1 < 0.98:
+                    result['games'][f1] = p1
+                    sports_count += 1
                 continue
 
-            # -- PLAYER PROPS --
-            # Broader pattern covering "X scores N+ points", "X has N rebounds",
-            # "X records N assists", "Will X have N+ ..."
-            prop_match = re.search(
-                r'(?:will\s+)?([a-zA-Z][a-zA-Z\.\-\' ]+?)\s+'
-                r'(?:score|scores|have|has|record|records|get|gets|make|makes|hit|hits|reach|reaches|go\s+over|tally)\s+'
-                r'(\d+(?:\.\d+)?)\+?\s*'
-                r'(points?|pts?|rebounds?|rebs?|assists?|asts?|three[s\-]?|3[- ]?pointers?|shots?|sog|goals?)',
-                q_low, re.IGNORECASE)
-            if prop_match:
-                player = prop_match.group(1).strip()
-                # Strip common prefixes
-                player = re.sub(r'^(will|do|does|the)\s+', '', player, flags=re.IGNORECASE).strip()
-                line_raw = float(prop_match.group(2))
-                stat = prop_match.group(3)
-                mkt = kalshi_stat_to_market(stat)
-                if mkt and 3 < len(player) < 40:
-                    line = (line_raw - 0.5) if line_raw == int(line_raw) else line_raw
-                    norm = normalize_player_name(player)
-                    if norm not in result['props']:
-                        result['props'][norm] = {}
-                    if mkt not in result['props'][norm]:
-                        result['props'][norm][mkt] = {}
-                    result['props'][norm][mkt][line] = yes_price
-                    sports_count += 1
+            # Shape B: "Will the X beat/win against Y ...?"
+            if 0.02 < p0 < 0.98:
+                gm = re.search(
+                    r'(?:will|do|does)\s+(?:the\s+)?(.+?)\s+'
+                    r'(?:win|beat|defeat|top)\s+(?:vs\.?\s+|against\s+|the\s+)?(.+?)[\?\.]?$',
+                    q_low)
+                if gm:
+                    team_str, opp_str = gm.group(1).strip(), gm.group(2).strip()
+                    home = next((full for key, full in all_teams.items()
+                                 if key in team_str), None)
+                    has_opp = any(key in opp_str for key in all_teams)
+                    if home and has_opp:
+                        candidates += 1
+                        result['games'][home] = p0
+                        sports_count += 1
 
-        log(f"  Polymarket: {len(markets)} markets, {candidates} candidates, {sports_count} matched")
-        log(f"    Games: {len(result['games'])} teams, Props: {len(result['props'])} players")
-
+        log(f"  Polymarket: {len(markets)} markets, {candidates} candidates, "
+            f"{sports_count} matched")
+        if candidates == 0 and samples:
+            log(f"  Polymarket sample questions: {' | '.join(samples)}")
     except Exception as e:
-        log(f"  Polymarket sports error: {e}")
-
+        log(f"  Polymarket error: {e}")
     return result
-
-
-# ============================================================
-# GAME MARKET ANALYSIS
-# ============================================================
 
 def analyze_game_markets(games_data, market_name="", poly_games=None, kalshi_games=None):
     if not games_data:
@@ -1292,6 +1326,7 @@ def analyze_game_markets(games_data, market_name="", poly_games=None, kalshi_gam
 
                 opportunities.append({
                     'player': display_name, 'game': game_info, 'commence': commence,
+                    'line': point if point is not None else 0,
                     'sport_key': sport_key_val, 'event_id': event_id_val,
                     'market': market_name, 'book': BOOK_DISPLAY.get(eval_book, eval_book),
                     'book_key': eval_book, 'type': 'game_market',
@@ -2255,6 +2290,22 @@ def _fetch_ensemble_forecast(lat, lon):
     return (None, 3.0)
 
 
+def _dedup_weather(opps):
+    """Buckets on the same (city, date, high/low) settle on ONE number, so they
+    are perfectly correlated -- surfacing five of them invites 5x exposure to a
+    single forecast miss. Keep only the best fee-adjusted edge per group."""
+    best = {}
+    for o in opps:
+        g = o.pop('_wgrp', None)
+        if g is None:
+            best[id(o)] = o
+            continue
+        cur = best.get(g)
+        if cur is None or o.get('edge', 0) > cur.get('edge', 0):
+            best[g] = o
+    return list(best.values())
+
+
 def fetch_weather_opps():
     # Calibration from /api/weather-backtest (archived forecast vs ERA5, the
     # 120 days ending 2026-06-12). (bias, error_std) in degrees F per (city, band).
@@ -2422,7 +2473,11 @@ def fetch_weather_opps():
                 else:
                     side, display_edge, side_prob = 'NO', edge_no, 1.0 - model_prob
                     side_price = (1.0 - yb_p) if yb_p is not None else (1.0 - k_mid)
-                if display_edge < 3:
+                # Net out the Kalshi taker fee at the execution price
+                # (7 * p * (1-p) cents/contract, ~1.75% at 50c). Without this,
+                # most "3% edges" are actually ~1% after fees.
+                display_edge -= kalshi_fee_pct(side_price)
+                if display_edge < WEATHER_MIN_EDGE:
                     continue
 
                 # Plain-English label, straight from Kalshi when present
@@ -2446,6 +2501,8 @@ def fetch_weather_opps():
                 price_c = round(side_price * 100)
 
                 opportunities.append({
+                    '_wgrp': (city_key, settle, kind),
+                    'sport_key': 'kalshi_weather', 'event_id': mkt.get('ticker', ''),
                     'player': f"{city_key.upper()}: {bucket_desc} ({day_lbl})",
                     'game': f"{day_lbl} forecast {band_word} {mean_high:.0f}\u00b0F \u00b1{std_dev:.0f}\u00b0 (GFS ensemble) \u00b7 "
                             f"pays if {bucket_desc}",
@@ -2467,7 +2524,8 @@ def fetch_weather_opps():
                 })
             except Exception:
                 continue
-        log_debug(f"  Weather: {matched_count} compared, {len(opportunities)} edges \u2265 3% "
+        opportunities = _dedup_weather(opportunities)
+        log_debug(f"  Weather: {matched_count} compared, {len(opportunities)} fee-adj edges \u2265 {WEATHER_MIN_EDGE:g}% "
                   f"({skipped_today} same-day/past skipped)")
     except Exception as e:
         log_debug(f"  Weather error: {e}")
@@ -2684,8 +2742,8 @@ def fetch_econ_opps():
             total_weight = sum(w for _, w, _ in sources)
             fair_prob = clamp_prob(sum(p * w for p, w, _ in sources) / total_weight)
 
-            edge_yes = (fair_prob - k_mid) * 100
-            edge_no = (k_mid - fair_prob) * 100
+            edge_yes = (fair_prob - k_mid) * 100 - kalshi_fee_pct(k_mid)
+            edge_no = (k_mid - fair_prob) * 100 - kalshi_fee_pct(1.0 - k_mid)
             actionable_edge = max(edge_yes, edge_no)
             if actionable_edge < min_edge:
                 continue
@@ -2706,6 +2764,7 @@ def fetch_econ_opps():
                 'player': k_title[:60],
                 'game': f"Fair: {fair_prob*100:.0f}% [{source_desc}] | {k_topic.upper()}",
                 'commence': '', 'market': 'Economic',
+                'sport_key': 'kalshi_econ', 'event_id': km.get('ticker', ''),
                 'book': 'Kalshi', 'book_key': 'kalshi', 'type': 'economic',
                 'edge': edge, 'gross_edge': edge,
                 'recommendation': f"{bet_action} (consensus {fair_prob*100:.0f}% vs Kalshi {k_mid*100:.0f}%)",
@@ -3162,6 +3221,250 @@ def update_clv():
     return updated
 
 
+
+# ============================================================
+# RESULT GRADING — forward paper-trading ledger
+# Grades logged game bets against final scores (ESPN public scoreboards)
+# and Kalshi weather/econ bets against exchange settlement. Turns the
+# opportunity log into a realized-P&L backtest that accrues automatically.
+# ============================================================
+
+ESPN_SB = {
+    'baseball_mlb': 'baseball/mlb',
+    'basketball_wnba': 'basketball/wnba',
+    'basketball_nba': 'basketball/nba',
+    'icehockey_nhl': 'hockey/nhl',
+    'americanfootball_nfl': 'football/nfl',
+    'americanfootball_ncaaf': 'football/college-football',
+    'basketball_ncaab': 'basketball/mens-college-basketball',
+    'soccer_usa_mls': 'soccer/usa.1',
+    'soccer_fifa_world_cup': 'soccer/fifa.world',
+}
+
+def _norm_team(s):
+    return re.sub(r'[^a-z0-9 ]', '', (s or '').lower()).strip()
+
+def _dec_odds(american):
+    try:
+        a = int(american)
+    except (TypeError, ValueError):
+        return None
+    if a == 0:
+        return None
+    return 1 + (a / 100.0 if a > 0 else 100.0 / abs(a))
+
+def _pnl_per_100(odds, result):
+    """Realized P&L for a $100 stake at american odds."""
+    if result == 'push':
+        return 0.0
+    if result == 'loss':
+        return -100.0
+    dec = _dec_odds(odds)
+    if result == 'win' and dec:
+        return round((dec - 1) * 100.0, 2)
+    return None
+
+def _grade_selection(mclass, player, line, home, away, home_score, away_score):
+    """Pure grading decision. player examples: 'Yankees ML', 'Over 8.5',
+    'Red Sox +1.5', 'Draw ML'. Returns 'win'/'loss'/'push' or None."""
+    p = (player or '').strip()
+    hn, an = _norm_team(home), _norm_team(away)
+    try:
+        hs, aw = float(home_score), float(away_score)
+    except (TypeError, ValueError):
+        return None
+
+    if mclass == 'h2h':
+        sel = _norm_team(re.sub(r'\s+ML$', '', p, flags=re.IGNORECASE))
+        if sel == 'draw':
+            return 'win' if hs == aw else 'loss'
+        if sel and (sel in hn or hn in sel):
+            return 'win' if hs > aw else ('push' if hs == aw else 'loss')
+        if sel and (sel in an or an in sel):
+            return 'win' if aw > hs else ('push' if hs == aw else 'loss')
+        return None
+
+    if mclass == 'totals':
+        m = re.match(r'^(Over|Under)\s+([\d.]+)$', p, flags=re.IGNORECASE)
+        pt = None
+        if m:
+            pt = float(m.group(2))
+            side = m.group(1).lower()
+        else:
+            side = 'over' if p.lower().startswith('over') else (
+                   'under' if p.lower().startswith('under') else None)
+        if pt is None:
+            try:
+                pt = float(line)
+            except (TypeError, ValueError):
+                return None
+        if side is None or pt <= 0:
+            return None
+        total = hs + aw
+        if total == pt:
+            return 'push'
+        went_over = total > pt
+        return 'win' if (went_over == (side == 'over')) else 'loss'
+
+    if mclass == 'spreads':
+        m = re.match(r'^(.*?)\s+([+-][\d.]+)$', p)
+        if not m:
+            return None
+        sel = _norm_team(m.group(1))
+        try:
+            pt = float(m.group(2))
+        except ValueError:
+            return None
+        if sel and (sel in hn or hn in sel):
+            margin = hs - aw
+        elif sel and (sel in an or an in sel):
+            margin = aw - hs
+        else:
+            return None
+        adj = margin + pt
+        if adj == 0:
+            return 'push'
+        return 'win' if adj > 0 else 'loss'
+
+    return None
+
+def _fetch_espn_scores(league_path, date_str, cache):
+    """Completed finals for one league/date -> list of
+    (home_name, away_name, home_score, away_score)."""
+    key = (league_path, date_str)
+    if key in cache:
+        return cache[key]
+    out = []
+    try:
+        r = requests.get(
+            f"https://site.api.espn.com/apis/site/v2/sports/{league_path}/scoreboard",
+            params={'dates': date_str}, timeout=15)
+        if r.status_code == 200:
+            for ev in (r.json().get('events') or []):
+                for comp in (ev.get('competitions') or []):
+                    st = (((comp.get('status') or {}).get('type')) or {})
+                    if not st.get('completed'):
+                        continue
+                    home = away = None
+                    for c in (comp.get('competitors') or []):
+                        t = c.get('team') or {}
+                        nm = t.get('displayName') or t.get('name') or ''
+                        try:
+                            sc = float(c.get('score'))
+                        except (TypeError, ValueError):
+                            continue
+                        if c.get('homeAway') == 'home':
+                            home = (nm, sc)
+                        elif c.get('homeAway') == 'away':
+                            away = (nm, sc)
+                    if home and away:
+                        out.append((home[0], away[0], home[1], away[1]))
+    except Exception:
+        pass
+    cache[key] = out
+    return out
+
+def _grade_kalshi_row(row):
+    """Grade a weather/econ row from Kalshi settlement. Returns
+    (result, pnl) or None if not settled yet."""
+    ticker = row['event_id']
+    if not ticker:
+        return None
+    try:
+        r = kalshi_get(f"{KALSHI_API}/markets/{ticker}", timeout=15)
+        if r.status_code != 200:
+            return None
+        mkt = (r.json() or {}).get('market') or {}
+    except Exception:
+        return None
+    status = (mkt.get('status') or '').lower()
+    settle = (mkt.get('result') or '').lower()
+    if status not in ('settled', 'finalized', 'determined') or settle not in ('yes', 'no'):
+        return None
+    rec = (row['recommendation'] or '').upper()
+    side = 'yes' if 'YES' in rec else ('no' if 'NO' in rec else '')
+    if not side:
+        return None
+    won = (side == settle)
+    try:
+        p = min(max(float(row['target_prob']) / 100.0, 0.02), 0.98)  # entry price
+    except (TypeError, ValueError):
+        return None
+    fee = kalshi_fee_pct(p)
+    pnl = round(100.0 * (1.0 - p) / p - fee, 2) if won else round(-100.0 - fee, 2)
+    return ('win' if won else 'loss', pnl)
+
+def grade_results(max_rows=250):
+    """Grade ungraded opportunities. Game bets: ESPN finals. Weather/econ:
+    Kalshi settlement. Props are proven via CLV instead (grading them would
+    need per-player box scores)."""
+    now = datetime.now(timezone.utc)
+    graded = 0
+    cache = {}
+    try:
+        with get_db() as conn:
+            rows = conn.execute("""
+                SELECT id, sport_key, event_id, market, player, game, line, odds,
+                       bet_type, recommendation, commence_time, target_prob, scan_time
+                FROM opportunities
+                WHERE (result IS NULL OR result = '')
+                  AND bet_type IN ('game_market', 'weather', 'economic')
+                  AND scan_time > datetime('now', '-14 days')
+                ORDER BY id DESC LIMIT ?
+            """, (max_rows,)).fetchall()
+
+            for row in rows:
+                res = pnl = None
+                bt = row['bet_type']
+                if bt in ('weather', 'economic'):
+                    out = _grade_kalshi_row(row)
+                    if out:
+                        res, pnl = out
+                    time.sleep(0.15)
+                else:
+                    league = ESPN_SB.get(row['sport_key'] or '')
+                    mclass = _market_name_to_api_key(row['market'])
+                    ct = row['commence_time'] or ''
+                    if not league or mclass not in ('h2h', 'spreads', 'totals') or not ct:
+                        continue
+                    try:
+                        start = datetime.fromisoformat(ct.replace('Z', '+00:00'))
+                    except Exception:
+                        continue
+                    if now < start + timedelta(hours=4):
+                        continue                      # not plausibly final yet
+                    g = row['game'] or ''
+                    if ' @ ' not in g:
+                        continue
+                    away_name, home_name = [x.strip() for x in g.split(' @ ', 1)]
+                    finals = []
+                    for delta in (0, -1, 1):
+                        ds = (start + timedelta(days=delta)).strftime('%Y%m%d')
+                        finals = _fetch_espn_scores(league, ds, cache)
+                        hit = None
+                        hn, an = _norm_team(home_name), _norm_team(away_name)
+                        for (eh, ea, hs, aw) in finals:
+                            if ((hn in _norm_team(eh) or _norm_team(eh) in hn) and
+                                    (an in _norm_team(ea) or _norm_team(ea) in an)):
+                                hit = (eh, ea, hs, aw)
+                                break
+                        if hit:
+                            res = _grade_selection(mclass, row['player'], row['line'],
+                                                   hit[0], hit[1], hit[2], hit[3])
+                            if res:
+                                pnl = _pnl_per_100(row['odds'], res)
+                            break
+                if res and pnl is not None:
+                    conn.execute(
+                        "UPDATE opportunities SET result=?, pnl=?, settled_at=? WHERE id=?",
+                        (res, pnl, now.isoformat(), row['id']))
+                    graded += 1
+            conn.commit()
+    except Exception as e:
+        print(f"grade_results error: {e}", flush=True)
+    return graded
+
+
 def _clv_background_worker():
     """Periodic CLV capture — runs in a daemon thread. Interval controlled by
     CLV_WORKER_INTERVAL_SEC env var (default 30 min)."""
@@ -3172,6 +3475,12 @@ def _clv_background_worker():
             update_clv()
         except Exception as e:
             print(f"CLV worker error: {e}", flush=True)
+        try:
+            n = grade_results()
+            if n:
+                print(f"Graded {n} settled bets", flush=True)
+        except Exception as e:
+            print(f"Grading worker error: {e}", flush=True)
         time.sleep(CLV_WORKER_INTERVAL_SEC)
 
 
@@ -3215,6 +3524,15 @@ def trigger_scan():
             return jsonify({'error': 'Scan in progress'})
     threading.Thread(target=scan_markets, daemon=True).start()
     return jsonify({'success': True})
+
+
+@app.route('/api/grade', methods=['POST', 'GET'])
+def api_grade():
+    auth_err = _auth_check()
+    if auth_err:
+        return auth_err
+    n = grade_results()
+    return jsonify({'graded': n})
 
 @app.route('/api/ingest', methods=['POST'])
 def api_ingest():
@@ -3672,8 +3990,8 @@ def econ_model():
                 continue
             ya_p = ya / 100.0 if ya > 0 else None
             yb_p = yb / 100.0 if yb > 0 else None
-            edge_yes = (p - ya_p) * 100 if ya_p is not None else -999.0
-            edge_no = (yb_p - p) * 100 if yb_p is not None else -999.0
+            edge_yes = (p - ya_p) * 100 - kalshi_fee_pct(ya_p) if ya_p is not None else -999.0
+            edge_no = (yb_p - p) * 100 - kalshi_fee_pct(1.0 - yb_p) if yb_p is not None else -999.0
             side, edge = ('YES', edge_yes) if edge_yes >= edge_no else ('NO', edge_no)
             # Liquidity gate: a wide bid/ask (or a one-sided quote) means there's
             # no real market, so the "edge" is an artifact of the spread.
@@ -3972,9 +4290,33 @@ def stats():
                        AVG(clv) as avg_clv, COUNT(clv) as clv_n
                 FROM opportunities GROUP BY day ORDER BY day DESC LIMIT 30
             """).fetchall()
+            realized = conn.execute("""
+                SELECT bet_type, COUNT(*) as n,
+                       SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) as wins,
+                       SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) as losses,
+                       SUM(CASE WHEN result='push' THEN 1 ELSE 0 END) as pushes,
+                       ROUND(SUM(pnl), 1) as total_pnl,
+                       ROUND(AVG(pnl), 2) as avg_pnl
+                FROM opportunities
+                WHERE result IN ('win','loss','push')
+                GROUP BY bet_type ORDER BY n DESC
+            """).fetchall()
+            realized_edge = conn.execute("""
+                SELECT CASE WHEN edge >= 6 THEN '6%+'
+                            WHEN edge >= 4 THEN '4-6%'
+                            WHEN edge >= 2 THEN '2-4%'
+                            ELSE '<2%' END as bucket,
+                       COUNT(*) as n, ROUND(SUM(pnl), 1) as total_pnl,
+                       ROUND(AVG(pnl), 2) as avg_pnl
+                FROM opportunities
+                WHERE result IN ('win','loss','push')
+                GROUP BY bucket ORDER BY MIN(edge) DESC
+            """).fetchall()
             return jsonify({
                 'total': total,
                 'with_clv': with_clv,
+                'realized': [dict(r) for r in realized],
+                'realized_edge': [dict(r) for r in realized_edge],
                 'overall_clv': dict(overall_clv) if overall_clv else {},
                 'by_type': [dict(r) for r in by_type],
                 'by_book': [dict(r) for r in by_book],
