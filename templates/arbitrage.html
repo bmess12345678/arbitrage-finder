@@ -941,6 +941,19 @@
                         return d.toLocaleString('en-US', {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
                     } catch { return iso; }
                 };
+                const resBadge = (o) => {
+                    if (!o.result) return '';
+                    const map = {win: ['W', '#48bb78', '#0d2818'],
+                                 loss: ['L', '#ff4757', '#2a0d14'],
+                                 push: ['P', '#aaa', '#222']};
+                    const [t, c, bg] = map[o.result] || [o.result, '#aaa', '#222'];
+                    const pnl = (o.pnl != null)
+                        ? ` <span style="color:${c}; font-size:0.85em;">${o.pnl >= 0 ? '+' : ''}$${Number(o.pnl).toFixed(0)}/100</span>`
+                        : '';
+                    return `<span style="color:${c}; font-weight:800; font-size:0.85em;
+                        margin-left:10px; padding:2px 8px; background:${bg};
+                        border-radius:4px;">${t}</span>${pnl}`;
+                };
                 const clvDisplay = (o) => {
                     if (o.clv == null) return '';
                     const clv = Number(o.clv);
@@ -961,7 +974,7 @@
                     <div class="history-row">
                         <span class="history-edge">+${(o.edge || 0).toFixed(1)}%</span>
                         <strong>${o.player || '?'}</strong> — ${o.recommendation || ''}
-                        ${clvDisplay(o)}
+                        ${clvDisplay(o)}${resBadge(o)}
                         <div class="history-meta">
                             ${fmtDate(o.scan_time)} · ${o.book} · ${o.market} · ${o.bet_type}
                             ${o.odds ? ` · ${o.odds > 0 ? '+' : ''}${o.odds}` : ''}
@@ -1033,6 +1046,55 @@
                         <span style="color:#666; font-size:0.8em;"> (n=${count})</span>`;
                 };
 
+                // Realized P&L (graded bets)
+                let realizedHtml = '';
+                const rz = data.realized || [];
+                if (rz.length) {
+                    const totPnl = rz.reduce((s, r) => s + (r.total_pnl || 0), 0);
+                    const totN = rz.reduce((s, r) => s + (r.n || 0), 0);
+                    const tc = totPnl >= 0 ? '#48bb78' : '#ff4757';
+                    const rows = rz.map(r => {
+                        const c = (r.total_pnl || 0) >= 0 ? '#48bb78' : '#ff4757';
+                        return `<tr>
+                            <td>${r.bet_type}</td>
+                            <td style="text-align:center;">${r.wins}-${r.losses}${r.pushes ? '-' + r.pushes : ''}</td>
+                            <td style="text-align:right; color:${c}; font-weight:700;">${(r.total_pnl || 0) >= 0 ? '+' : ''}$${fmt(r.total_pnl)}</td>
+                            <td style="text-align:right; color:#888;">$${r.avg_pnl == null ? '—' : Number(r.avg_pnl).toFixed(2)}</td>
+                        </tr>`;
+                    }).join('');
+                    const eb = (data.realized_edge || []).map(r => {
+                        const c = (r.total_pnl || 0) >= 0 ? '#48bb78' : '#ff4757';
+                        return `<tr><td>${r.bucket} edges</td><td style="text-align:center;">${r.n}</td>
+                            <td style="text-align:right; color:${c}; font-weight:700;">${(r.total_pnl || 0) >= 0 ? '+' : ''}$${fmt(r.total_pnl)}</td>
+                            <td style="text-align:right; color:#888;">$${r.avg_pnl == null ? '—' : Number(r.avg_pnl).toFixed(2)}</td></tr>`;
+                    }).join('');
+                    realizedHtml = `
+                        <div class="stats-section" style="border-left:4px solid ${tc};">
+                            <h3>Realized Results (paper-trading ledger)</h3>
+                            <div style="font-size:0.75em; color:#888; margin:6px 0 10px; line-height:1.5;">
+                                Every flagged bet, graded automatically after settlement, assuming a flat $100
+                                stake at the flagged odds. This is your forward backtest — judge each strategy
+                                on its record here before staking real money on it.
+                            </div>
+                            <table style="width:100%; font-size:0.85em; border-collapse:collapse;">
+                                <tr style="color:#888; font-size:0.85em;"><th style="text-align:left;">Strategy</th>
+                                    <th>W-L-P</th><th style="text-align:right;">Total P&L</th><th style="text-align:right;">Avg/bet</th></tr>
+                                ${rows}
+                                <tr style="border-top:1px solid #333;"><td style="font-weight:700;">All graded (${totN})</td><td></td>
+                                    <td style="text-align:right; color:${tc}; font-weight:800;">${totPnl >= 0 ? '+' : ''}$${totPnl.toFixed(1)}</td><td></td></tr>
+                            </table>
+                            ${eb ? `<div style="font-size:0.75em; color:#888; margin:12px 0 4px;">By flagged edge size:</div>
+                            <table style="width:100%; font-size:0.85em; border-collapse:collapse;">${eb}</table>` : ''}
+                        </div>`;
+                } else {
+                    realizedHtml = `<div class="stats-section" style="border-left:4px solid #555;">
+                        <h3>Realized Results</h3>
+                        <div style="color:#888; font-size:0.85em;">
+                            No graded bets yet. Game bets grade automatically ~4h after final;
+                            Kalshi weather/econ bets grade at settlement. Check back tomorrow.
+                        </div></div>`;
+                }
+
                 // Overall CLV hero
                 const oc = data.overall_clv || {};
                 const ocCount = oc.n || 0;
@@ -1096,6 +1158,7 @@
                         Total logged: <strong style="color:#fff;">${data.total}</strong> ·
                         With CLV: <strong style="color:#fff;">${data.with_clv || 0}</strong>
                     </div>
+                    ${realizedHtml}
                     ${clvHero}
                     <div class="stats-section">
                         <h3>By Type</h3>
