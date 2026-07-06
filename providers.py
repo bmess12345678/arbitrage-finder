@@ -901,15 +901,19 @@ _mgm_token = [os.environ.get('BETMGM_ACCESS_ID', '')]
 def _mgm_access_id(log):
     if _mgm_token[0]:
         return _mgm_token[0]
-    try:
-        r = _session.get(f'{MGM_BASE}/en/sports', timeout=20)
-        m = re.search(r'accessId["\']?\s*[:=]\s*["\']([A-Za-z0-9_\-+=]{16,})',
-                      r.text or '')
-        if m:
-            _mgm_token[0] = m.group(1)
-            return _mgm_token[0]
-    except Exception:
-        pass
+    for path in ('/en/sports', '/en/sports/events', ''):
+        try:
+            r = _session.get(f'{MGM_BASE}{path}', timeout=20)
+            txt = r.text or ''
+            for pat in (r'accessId["\']?\s*[:=]\s*["\']([A-Za-z0-9_\-+=]{16,})',
+                        r'x-bwin-accessid["\']?\s*[:=]\s*["\']([A-Za-z0-9_\-+=]{16,})',
+                        r'accessid=([A-Za-z0-9_\-+=]{16,})'):
+                m = re.search(pat, txt, re.IGNORECASE)
+                if m:
+                    _mgm_token[0] = m.group(1)
+                    return _mgm_token[0]
+        except Exception:
+            continue
     log('    betmgm: could not extract access id '
         '(set BETMGM_ACCESS_ID env var from devtools)')
     return ''
