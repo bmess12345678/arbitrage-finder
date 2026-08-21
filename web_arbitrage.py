@@ -14,6 +14,7 @@ MONETIZATION INFRASTRUCTURE:
 from flask import Flask, render_template, jsonify, request, Response
 import requests
 import re
+import unicodedata
 import time
 import sqlite3
 import math
@@ -235,7 +236,7 @@ def log_debug(msg):
 #   * otherwise                          -> SQLite at DB_PATH (local dev).
 # ============================================================
 
-BUILD_TAG = '2026-08-21c'
+BUILD_TAG = '2026-08-21d'
 print(f'BUILD {BUILD_TAG} starting', flush=True)
 
 DATABASE_URL = (os.environ.get('DATABASE_URL', '') or '').strip()
@@ -499,9 +500,16 @@ def kalshi_prices(m):
     return int(yb), int(ya), int(lp)
 
 def normalize_player_name(name):
+    """Aggressive normalization so 'A'ja Wilson', 'Aja Wilson' and
+    'Leïla Lacan'/'Leila Lacan' all key identically — sources disagree on
+    apostrophes and accents, and a silent mismatch throws away the whole
+    exchange consensus for that player."""
+    name = unicodedata.normalize('NFKD', str(name))
+    name = ''.join(c for c in name if not unicodedata.combining(c))
     name = ' '.join(name.strip().split()).lower()
     name = re.sub(r'\s+(jr\.?|sr\.?|ii+|iv|v)$', '', name)
-    return name
+    name = re.sub(r'[^a-z0-9 ]', '', name)
+    return ' '.join(name.split())
 
 def kalshi_stat_to_market(stat_str):
     s = stat_str.lower()
@@ -1130,7 +1138,12 @@ def fetch_kalshi_sports(log_fn=None):
 
     result = {'props': {}, 'games': {}}
     now = datetime.now(timezone.utc)
-    horizon = now + timedelta(hours=60)
+    # Kalshi game markets' close_time is the settlement deadline, ~3 days
+    # AFTER first pitch/kickoff (verified from live tickers: an Aug 23 game
+    # closes Aug 26). A 60h window therefore excluded every game. 7 days
+    # captures today's slate; earliest-close-per-team still picks the
+    # nearest game for each team.
+    horizon = now + timedelta(days=7)
     games_matched, games_close = 0, {}
 
     # ---- single-game moneylines ----
@@ -1584,6 +1597,7 @@ PROP_DIST = {
 MAX_TRANSLATE_FRAC = float(os.environ.get('MAX_TRANSLATE_FRAC', '0.25'))
 DERIVED_SHRINK = float(os.environ.get('DERIVED_SHRINK', '0.75'))
 MIN_EDGE_DERIVED = float(os.environ.get('MIN_EDGE_DERIVED', '2.0'))
+MODEL_MIN_EDGE = float(os.environ.get('MODEL_MIN_EDGE', '4.0'))
 
 def _phi(z):
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
@@ -1651,6 +1665,249 @@ def translate_prop_prob(market_key, from_line, over_prob, to_line):
             hi = lam
     return _pois_sf((lo + hi) / 2, k2)
 
+
+# ============================================================
+# ORIGINATION MODEL v1 — game-line-derived player points pricing
+# The market's team total already encodes pace, defense, and injuries at
+# sharp-market quality. The only original input is each player's recent
+# scoring SHARE of their team (last ~10 days of box scores). Projection:
+#   mu = share x implied_team_total,  P(over L) = 1 - Phi((L - mu)/(cv*mu))
+# This prices a prop against even a SINGLE book's quote — no second book
+# or exchange needed. Guarded hard (form depth, share bounds, mu-vs-line
+# sanity, 4% floor) and accountable via CLV like every other flag.
+# ============================================================
+
+_FORM_CACHE = {}
+_FORM_TTL = 6 * 3600
+
+def _espn_event_ids(league_path, date_str):
+    out = []
+    try:
+        r = requests.get(
+            f"https://site.api.espn.com/apis/site/v2/sports/{league_path}/scoreboard",
+            params={'dates': date_str}, timeout=12)
+        if r.status_code == 200:
+            for ev in (r.json().get('events') or []):
+                st = ((((ev.get('competitions') or [{}])[0].get('status') or {})
+                       .get('type')) or {})
+                if st.get('completed'):
+                    out.append(ev.get('id'))
+    except Exception:
+        pass
+    return [e for e in out if e]
+
+def _load_recent_form(sport_key, days=10, max_events=50):
+    """Per-player recent scoring averages + team scoring, from free ESPN
+    box scores. Cached 6h. Returns {'players': {norm: {...}}, 'teams': {...}}."""
+    league = ESPN_SB.get(sport_key)
+    if not league:
+        return {'players': {}, 'teams': {}}
+    cached = _FORM_CACHE.get(sport_key)
+    if cached and time.time() - cached['ts'] < _FORM_TTL:
+        return cached
+    players, teams = {}, {}
+    try:
+        eids = []
+        for d in range(1, days + 1):
+            ds = (datetime.now() - timedelta(days=d)).strftime('%Y%m%d')
+            eids.extend(_espn_event_ids(league, ds))
+            if len(eids) >= max_events:
+                break
+        for eid in eids[:max_events]:
+            try:
+                r = requests.get(
+                    f"https://site.api.espn.com/apis/site/v2/sports/{league}/summary",
+                    params={'event': eid}, timeout=12)
+                if r.status_code != 200:
+                    continue
+                for tb in ((r.json().get('boxscore') or {}).get('players') or []):
+                    tname = _norm_team(((tb.get('team') or {}).get('displayName')) or '')
+                    if not tname:
+                        continue
+                    stat_blocks = tb.get('statistics') or []
+                    if not stat_blocks:
+                        continue
+                    sb = stat_blocks[0]
+                    labels = sb.get('labels') or sb.get('names') or []
+                    try:
+                        pts_i = labels.index('PTS')
+                    except ValueError:
+                        continue
+                    team_pts = 0.0
+                    for ath in (sb.get('athletes') or []):
+                        nm = ((ath.get('athlete') or {}).get('displayName')) or ''
+                        stv = ath.get('stats') or []
+                        if not nm or pts_i >= len(stv):
+                            continue
+                        try:
+                            pts = float(stv[pts_i])
+                        except (TypeError, ValueError):
+                            continue
+                        team_pts += pts
+                        p = players.setdefault(normalize_player_name(nm),
+                                               {'g': 0, 'pts': 0.0, 'team': tname})
+                        p['g'] += 1
+                        p['pts'] += pts
+                        p['team'] = tname
+                    if team_pts > 0:
+                        t = teams.setdefault(tname, {'g': 0, 'pts': 0.0})
+                        t['g'] += 1
+                        t['pts'] += team_pts
+            except Exception:
+                continue
+            time.sleep(0.12)
+    except Exception as e:
+        log_debug(f"    form load error: {e}")
+    out = {'ts': time.time(),
+           'players': {k: {'g': v['g'], 'pts_pg': v['pts'] / v['g'], 'team': v['team']}
+                       for k, v in players.items() if v['g'] > 0},
+           'teams': {k: v['pts'] / v['g'] for k, v in teams.items() if v['g'] > 0}}
+    _FORM_CACHE[sport_key] = out
+    return out
+
+def _implied_team_totals(sport_key, home, away):
+    """(home_tt, away_tt) from the market's main total and spread:
+    home_tt = (T - s_home)/2. Sharp inputs in, team expectations out."""
+    try:
+        tot_games = fetch_odds(sport_key, 'totals') or []
+        sp_games = fetch_odds(sport_key, 'spreads') or []
+    except Exception:
+        return None
+    def _find(games):
+        for g in games:
+            if g.get('home_team') == home and g.get('away_team') == away:
+                return g
+        return None
+    tg, sg = _find(tot_games), _find(sp_games)
+    if not tg or not sg:
+        return None
+    def _pick(g, mkey):
+        bms = g.get('bookmakers', [])
+        for bm in bms:
+            if bm.get('key') == 'pinnacle':
+                for m in bm.get('markets', []):
+                    if m.get('key') == mkey:
+                        return m
+        for bm in bms:
+            for m in bm.get('markets', []):
+                if m.get('key') == mkey:
+                    return m
+        return None
+    tm, sm = _pick(tg, 'totals'), _pick(sg, 'spreads')
+    if not tm or not sm:
+        return None
+    try:
+        T = float((tm.get('outcomes') or [{}])[0].get('point'))
+        s_home = None
+        for o in sm.get('outcomes', []):
+            if o.get('name') == home:
+                s_home = float(o.get('point'))
+        if s_home is None or T <= 0:
+            return None
+        home_tt = (T - s_home) / 2.0
+        return (home_tt, T - home_tt)
+    except (TypeError, ValueError):
+        return None
+
+def model_prop_opportunities(edatas, sport_key, prop_name, market_key='player_points'):
+    if market_key != 'player_points' or sport_key not in (
+            'basketball_wnba', 'basketball_nba'):
+        return []
+    form = _load_recent_form(sport_key)
+    if len(form.get('players', {})) < 5:
+        log_debug(f"    model props: insufficient form data "
+                  f"({len(form.get('players', {}))} players)")
+        return []
+    cv = 0.32
+    out, cand = [], 0
+    for edata in edatas:
+        home = edata.get('home_team', '')
+        away = edata.get('away_team', '')
+        tts = _implied_team_totals(sport_key, home, away)
+        if not tts:
+            continue
+        hn, an = _norm_team(home), _norm_team(away)
+        quotes = {}
+        for bm in edata.get('bookmakers', []):
+            bk = bm.get('key')
+            if bk not in CO_BETTABLE:
+                continue
+            for m in bm.get('markets', []):
+                for o in m.get('outcomes', []):
+                    pl, ln, px = o.get('description'), o.get('point'), o.get('price')
+                    sd = (o.get('name') or '').lower()
+                    if not pl or ln is None or px is None:
+                        continue
+                    q = quotes.setdefault(pl, {}).setdefault(bk, {'line': ln})
+                    if 'over' in sd:
+                        q['over'] = px
+                    elif 'under' in sd:
+                        q['under'] = px
+                    q['line'] = ln
+        for pl, bks in quotes.items():
+            f = form['players'].get(normalize_player_name(pl))
+            if not f or f['g'] < 3:
+                continue
+            tavg = form['teams'].get(f['team'])
+            if not tavg or tavg <= 0:
+                continue
+            share = f['pts_pg'] / tavg
+            if not (0.02 <= share <= 0.45):
+                continue
+            if f['team'] in hn or hn in f['team']:
+                mu = share * tts[0]
+            elif f['team'] in an or an in f['team']:
+                mu = share * tts[1]
+            else:
+                continue
+            sigma = cv * mu
+            if mu <= 0 or sigma <= 0:
+                continue
+            for bk, q in bks.items():
+                if 'over' not in q or 'under' not in q:
+                    continue
+                L = float(q['line'])
+                cand += 1
+                if abs(mu - L) > 0.30 * max(L, 8.0):
+                    continue        # model disagrees too hard with the line;
+                                    # distrust the MODEL, same logic as the
+                                    # exchange divergence guard
+                p_over = max(0.0, min(1.0, 1.0 - _phi((L - mu) / sigma)))
+                over_imp = american_to_implied(q['over'])
+                under_imp = american_to_implied(q['under'])
+                juice = round((over_imp + under_imp - 1.0) * 100, 1)
+                for side, p_model, imp, odds in [
+                        ('OVER', p_over, over_imp, q['over']),
+                        ('UNDER', 1.0 - p_over, under_imp, q['under'])]:
+                    edge = (p_model - imp) * 100
+                    if edge < MODEL_MIN_EDGE or edge > 15:
+                        continue
+                    kf = quarter_kelly(p_model, odds)
+                    out.append({
+                        'player': pl, 'game': f"{away} @ {home}",
+                        'commence': edata.get('commence_time', ''),
+                        'sport_key': sport_key, 'event_id': edata.get('id', ''),
+                        'market': prop_name,
+                        'book': BOOK_DISPLAY.get(bk, bk), 'book_key': bk,
+                        'type': 'player_prop', 'model': True,
+                        'edge': round(edge, 1), 'gross_edge': round(edge, 1),
+                        'recommendation': f"{side} {L}", 'odds': odds, 'line': L,
+                        'label1_name': f'{BOOK_DISPLAY.get(bk, bk)} Odds',
+                        'label1_value': format_american(odds),
+                        'label2_name': f'Model fair (\u03bc {mu:.1f} pts, game-line derived)',
+                        'label2_value': format_american(implied_to_american(clamp_prob(p_model))),
+                        'label3_name': 'Model Edge', 'label3_value': f"+{edge:.1f}%",
+                        'target_prob': round(imp * 100, 1),
+                        'fair_prob': round(p_model * 100, 1),
+                        'juice_display': f"{juice}%",
+                        'consensus_books': 0, 'consensus_detail': [],
+                        'kelly_fraction': round(kf * 100, 2),
+                        'affiliate_url': affiliate_url(bk),
+                    })
+    log_debug(f"    model props: {len(out)} flagged from {cand} priced quotes "
+              f"({len(form['players'])} players in form)")
+    return out
+
 def analyze_player_props(games_data, market_name="", kalshi_props=None, poly_props=None, market_key=""):
     if not games_data:
         return []
@@ -1664,7 +1921,8 @@ def analyze_player_props(games_data, market_name="", kalshi_props=None, poly_pro
         elif 'total base' in mn or 'total bases' in mn: market_key = 'player_total_bases'
 
     opportunities = []
-    stats = {'players': 0, 'same_line': 0, 'diff_line': 0, 'too_few_books': 0}
+    stats = {'players': 0, 'same_line': 0, 'diff_line': 0, 'too_few_books': 0,
+             'exch': 0}
 
     for game in games_data:
         game_info = f"{game.get('away_team', '?')} @ {game.get('home_team', '?')}"
@@ -1712,6 +1970,8 @@ def analyze_player_props(games_data, market_name="", kalshi_props=None, poly_pro
             # One book vs a 3x-weight exchange quote is exactly the
             # book-vs-Kalshi prop comparison this scanner exists for; requiring
             # two BOOKS silently discarded every such player.
+            if _has_exchange:
+                stats['exch'] += 1
             if len(books_with_both) < (1 if _has_exchange else 2):
                 stats['too_few_books'] += 1
                 continue
@@ -1890,7 +2150,7 @@ def analyze_player_props(games_data, market_name="", kalshi_props=None, poly_pro
                             'affiliate_url': affiliate_url(eval_book),
                         })
 
-    log_debug(f"    Players: {stats['players']}, same-line: {stats['same_line']}, "
+    log_debug(f"    Players: {stats['players']} ({stats['exch']} w/ exchange), same-line: {stats['same_line']}, "
               f"too few books: {stats['too_few_books']}, diff-line: {stats['diff_line']} "
               f"→ {len(opportunities)} +EV")
     return opportunities
@@ -2239,6 +2499,7 @@ def fetch_event_props(sport, prop_markets, max_events=8, kalshi_props=None, poly
     events_to_scan = events[:max_events]
     log_debug(f"  Scanning {len(events_to_scan)} of {len(events)} {sport} events")
 
+    model_edatas, model_prop_name = [], ''
     for event in events_to_scan:
         eid = event.get('id')
         home = event.get('home_team', '?')
@@ -2249,6 +2510,9 @@ def fetch_event_props(sport, prop_markets, max_events=8, kalshi_props=None, poly
                 return all_opps, all_arbs
             edata = fetch_event_odds(sport, eid, prop_market)
             if edata and edata.get('bookmakers'):
+                if prop_market == 'player_points':
+                    model_edatas.append(edata)
+                    model_prop_name = prop_name
                 opps = analyze_player_props([edata], prop_name,
                     kalshi_props=kalshi_props, poly_props=poly_props, market_key=prop_market)
                 arbs = find_prop_arbs([edata], prop_name)
@@ -2258,6 +2522,12 @@ def fetch_event_props(sport, prop_markets, max_events=8, kalshi_props=None, poly
                 if arbs:
                     all_arbs.extend(arbs)
             time.sleep(0.3)
+    if model_edatas:
+        try:
+            mo = model_prop_opportunities(model_edatas, sport, model_prop_name)
+            all_opps.extend(mo)
+        except Exception as e:
+            log_debug(f"    model props error: {e}")
     log_debug(f"  {sport} props: {len(all_opps)} +EV, {len(all_arbs)} arbs")
     return all_opps, all_arbs
 
@@ -4720,7 +4990,8 @@ def stats():
             by_type = conn.execute("""
                 SELECT bet_type, COUNT(*) as n, AVG(edge) as avg_edge, AVG(kelly_fraction) as avg_kelly,
                        AVG(clv) as avg_clv, COUNT(clv) as clv_n
-                FROM opportunities GROUP BY bet_type
+                FROM opportunities WHERE bet_type != 'weather_calib'
+                GROUP BY bet_type
             """).fetchall()
             by_book = conn.execute("""
                 SELECT book, COUNT(*) as n, AVG(edge) as avg_edge,
