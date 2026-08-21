@@ -20,7 +20,7 @@ import math
 import json
 import csv
 import io
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 try:
     from zoneinfo import ZoneInfo
 except Exception:                       # pragma: no cover
@@ -144,8 +144,9 @@ GAME_MARKETS = [
     ('baseball_mlb', 'h2h', 'MLB Moneyline'),
     ('baseball_mlb', 'spreads', 'MLB Run Line'),
     ('baseball_mlb', 'totals', 'MLB Totals'),
-    ('soccer_fifa_world_cup', 'h2h', 'World Cup Moneyline'),  # 3-way; n-way devig
-    ('soccer_fifa_world_cup', 'totals', 'World Cup Totals'),
+    # World Cup 2026 ended Jul 19 — re-enable for the next tournament:
+    # ('soccer_fifa_world_cup', 'h2h', 'World Cup Moneyline'),  # 3-way; n-way devig
+    # ('soccer_fifa_world_cup', 'totals', 'World Cup Totals'),
     ('basketball_wnba', 'h2h', 'WNBA Moneyline'),
     ('basketball_wnba', 'spreads', 'WNBA Spread'),
     ('basketball_wnba', 'totals', 'WNBA Totals'),
@@ -2028,7 +2029,7 @@ def fetch_cross_exchange_opps():
         kalshi_markets = {}
         cursor = ''
         for page in range(5):
-            params = {'status': 'open', 'limit': 200}
+            params = {'status': 'open', 'limit': 200, 'mve_filter': 'exclude'}
             if cursor:
                 params['cursor'] = cursor
             resp = kalshi_get(f"{KALSHI_API}/markets", params=params, timeout=15)
@@ -3511,7 +3512,7 @@ def grade_results(max_rows=250):
                 FROM opportunities
                 WHERE (result IS NULL OR result = '')
                   AND bet_type IN ('game_market', 'weather', 'economic')
-                  AND scan_time > datetime('now', '-14 days')
+                  AND scan_time > datetime('now', '-30 days')
                 ORDER BY id DESC LIMIT ?
             """, (max_rows,)).fetchall()
 
