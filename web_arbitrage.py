@@ -234,6 +234,9 @@ def log_debug(msg):
 #   * otherwise                          -> SQLite at DB_PATH (local dev).
 # ============================================================
 
+BUILD_TAG = '2026-08-21c'
+print(f'BUILD {BUILD_TAG} starting', flush=True)
+
 DATABASE_URL = (os.environ.get('DATABASE_URL', '') or '').strip()
 USE_PG = DATABASE_URL.startswith('postgres')
 if USE_PG:
@@ -3256,6 +3259,7 @@ def scan_markets():
         log_debug("Direct feeds: " + ("ON (Pinnacle/DK/FD/MGM/BetRivers)" if providers.ENABLED else "OFF") + (" | Odds API fallback: " + str(len(API_KEYS)) + " keys" if API_KEYS else " | no Odds API keys"))
     log_debug(f"Bettable: {', '.join(BOOK_DISPLAY.get(b, b) for b in CO_BETTABLE)}")
     log_debug(f"Consensus: + {', '.join(BOOK_DISPLAY.get(b, b) for b in CONSENSUS_ONLY)} + Kalshi + Polymarket")
+    log_debug(f"Build: {BUILD_TAG}")
     log_debug(f"Strategy: CO book vs weighted consensus (Pinnacle/Kalshi/Poly 3x) | Min edge: {MIN_EDGE_NET}%")
     log_debug(f"Markets: moneylines + spreads + totals + props | arbs, middles (cost cap {MIDDLE_MAX_COST}%), +EV")
 
@@ -3828,6 +3832,76 @@ def trigger_scan():
             return jsonify({'error': 'Scan in progress'})
     threading.Thread(target=scan_markets, daemon=True).start()
     return jsonify({'success': True})
+
+
+@app.route('/api/cleanup-dupes', methods=['GET', 'POST'])
+def api_cleanup_dupes():
+    auth_err = _auth_check()
+    if auth_err:
+        return auth_err
+    apply_changes = request.args.get('apply', '') == '1'
+    try:
+        with get_db() as conn:
+            rows = conn.execute("""
+                SELECT id, player, game, market, book, scan_time,
+                       result, pnl, settled_at
+                FROM opportunities
+                ORDER BY player, game, market, book, scan_time, id
+            """).fetchall()
+            to_delete = []
+            grade_copies = []      # (result, pnl, settled_at, keeper_id)
+            i, n = 0, len(rows)
+            while i < n:
+                j = i + 1
+                key = (rows[i]['player'], rows[i]['game'],
+                       rows[i]['market'], rows[i]['book'])
+                try:
+                    anchor_t = datetime.fromisoformat(
+                        (rows[i]['scan_time'] or '')[:19])
+                except Exception:
+                    anchor_t = None
+                cluster = [rows[i]]
+                while j < n:
+                    r = rows[j]
+                    if (r['player'], r['game'], r['market'], r['book']) != key:
+                        break
+                    try:
+                        t = datetime.fromisoformat((r['scan_time'] or '')[:19])
+                    except Exception:
+                        t = None
+                    if anchor_t and t and (t - anchor_t) > timedelta(hours=12):
+                        break              # next 12h cluster for the same bet
+                    cluster.append(r)
+                    j += 1
+                if len(cluster) > 1:
+                    keeper = cluster[0]
+                    if not keeper['result']:
+                        graded = next((c for c in cluster[1:] if c['result']), None)
+                        if graded:
+                            grade_copies.append((graded['result'], graded['pnl'],
+                                                 graded['settled_at'], keeper['id']))
+                    to_delete.extend(c['id'] for c in cluster[1:])
+                i = j
+            if apply_changes:
+                for gc in grade_copies:
+                    conn.execute("UPDATE opportunities SET result=?, pnl=?, "
+                                 "settled_at=? WHERE id=?", gc)
+                for k in range(0, len(to_delete), 400):
+                    chunk = to_delete[k:k + 400]
+                    ph = ','.join('?' * len(chunk))
+                    conn.execute(
+                        f"DELETE FROM opportunities WHERE id IN ({ph})", chunk)
+        return jsonify({
+            'total_rows': len(rows),
+            'duplicates_found': len(to_delete),
+            'grades_preserved': len(grade_copies),
+            'applied': apply_changes,
+            'note': ('Deleted. Stats/bankroll now recompute on clean data.'
+                     if apply_changes else
+                     'Dry run only — add &apply=1 to execute.'),
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/grade', methods=['POST', 'GET'])
@@ -4520,6 +4594,7 @@ def diagnose():
         'api_keys_count': len(API_KEYS),
         'llm_enabled': LLM_PARSER_ENABLED,
         'kalshi_key_set': bool(KALSHI_API_KEY),
+        'build': BUILD_TAG,
         'db_backend': 'postgres (persistent)' if USE_PG else f'sqlite {DB_PATH} (EPHEMERAL on Render)',
     }
     return jsonify(out)
