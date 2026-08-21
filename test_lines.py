@@ -251,6 +251,100 @@ except NameError as e:
 finally:
     wa.kalshi_get = _real_kget
 
+# ---------- 17. Exchange opponent verification (the Browns bug) ----------
+poly_bad = {'Cleveland Browns': {'p': 0.535, 'opp': 'New York Jets', 'end': '2027-01-05'}}
+poly_good = {'Cleveland Browns': {'p': 0.25, 'opp': 'Jacksonville Jaguars', 'end': '2026-09-13'}}
+games_ex = mk_v4({
+    'fanduel': [{'key': 'h2h', 'outcomes': [
+        {'name': 'Jacksonville Jaguars', 'price': -430},
+        {'name': 'Cleveland Browns', 'price': +330}]}],
+    'pinnacle': [{'key': 'h2h', 'outcomes': [
+        {'name': 'Jacksonville Jaguars', 'price': -380},
+        {'name': 'Cleveland Browns', 'price': +288}]}],
+})
+games_ex[0]['home_team'] = 'Jacksonville Jaguars'
+games_ex[0]['away_team'] = 'Cleveland Browns'
+opps_bad = wa.analyze_game_markets(games_ex, 'NFL Moneyline', poly_games=poly_bad)
+big_fake = [o for o in opps_bad if o.get('edge', 0) > 5]
+check('wrong-opponent Poly market NEVER joins consensus', len(big_fake) == 0,
+      str([(o['player'], o['edge']) for o in opps_bad]))
+opps_good = wa.analyze_game_markets(games_ex, 'NFL Moneyline', poly_games=poly_good)
+used_poly = any(any(d.get('book') == 'Polymarket' for d in (o.get('consensus_detail') or []))
+                for o in opps_good)
+check('right-opponent Poly market DOES join consensus', used_poly)
+legacy_float = {'Cleveland Browns': 0.535}
+opps_leg = wa.analyze_game_markets(games_ex, 'NFL Moneyline', poly_games=legacy_float)
+check('legacy float entries rejected outright',
+      all(o.get('edge', 0) < 5 for o in opps_leg))
+
+# ---------- 18. Kalshi opponent parsing from ticker ----------
+_real_kget2 = wa.kalshi_get
+from datetime import datetime as _dtm, timedelta as _tdl, timezone as _tzn
+_soon = (_dtm.now(_tzn.utc) + _tdl(hours=5)).strftime('%Y-%m-%dT%H:%M:%SZ')
+def _kget_games(url, params=None, timeout=15):
+    return _FakeResp({'markets': [
+        {'ticker': 'KXMLBGAME-26AUG211845LAASD-SD', 'close_time': _soon,
+         'yes_bid': 60, 'yes_ask': 62},
+        {'ticker': 'KXMLBGAME-26AUG211845LAASD-LAA', 'close_time': _soon,
+         'yes_bid': 38, 'yes_ask': 40},
+    ], 'cursor': ''})
+wa.kalshi_get = _kget_games
+try:
+    kres = wa.fetch_kalshi_sports(log_fn=lambda m: None)
+    sd = kres['games'].get('San Diego Padres')
+    laa = kres['games'].get('Los Angeles Angels')
+    check('kalshi ambiguous code split (LAA+SD)',
+          isinstance(sd, dict) and sd['opp'] == 'Los Angeles Angels'
+          and isinstance(laa, dict) and laa['opp'] == 'San Diego Padres',
+          str(kres['games']))
+finally:
+    wa.kalshi_get = _real_kget2
+
+# ---------- 19. Derivative translation math ----------
+tr = wa.translate_prop_prob
+p_same = tr('player_points', 24.5, 0.55, 24.5)
+check('translate identity', p_same == 0.55)
+p_up = tr('player_points', 24.5, 0.55, 25.5)
+check('normal: higher line -> lower over prob', p_up is not None and p_up < 0.55, str(p_up))
+p_dn = tr('player_points', 24.5, 0.55, 23.5)
+check('normal: lower line -> higher over prob', p_dn is not None and p_dn > 0.55, str(p_dn))
+# round trip: translate up then back ≈ original
+p_rt = tr('player_points', 25.5, p_up, 24.5) if p_up else None
+check('normal round-trip consistent', p_rt is not None and abs(p_rt - 0.55) < 0.02, str(p_rt))
+q_up = tr('player_strikeouts', 6.5, 0.60, 7.5)
+check('poisson: higher K line -> lower over prob', q_up is not None and q_up < 0.60, str(q_up))
+q_rt = tr('player_strikeouts', 7.5, q_up, 6.5) if q_up else None
+check('poisson round-trip consistent', q_rt is not None and abs(q_rt - 0.60) < 0.02, str(q_rt))
+check('too-far hop refused', tr('player_points', 10.5, 0.55, 20.5) is None)
+check('integer poisson line refused', tr('player_strikeouts', 6.0, 0.55, 7.5) is None)
+check('unknown stat refused', tr('player_touchdowns_xyz', 1.5, 0.5, 2.5) is None)
+
+# ---------- 20. Prop consensus with translated legs ----------
+def prop_game(fd_line, fd_o, fd_u, br_line, br_o, br_u, pin_line, pin_o, pin_u):
+    return [{
+        'home_team': 'Denver Nuggets', 'away_team': 'LA Lakers',
+        'commence_time': '2026-08-22T00:00:00Z', 'id': 'evp1', 'sport_key': 'basketball_nba',
+        'bookmakers': [
+            {'key': 'fanduel', 'markets': [{'key': 'player_points', 'outcomes': [
+                {'description': 'Nikola Jokic', 'name': 'Over', 'point': fd_line, 'price': fd_o},
+                {'description': 'Nikola Jokic', 'name': 'Under', 'point': fd_line, 'price': fd_u}]}]},
+            {'key': 'betrivers', 'markets': [{'key': 'player_points', 'outcomes': [
+                {'description': 'Nikola Jokic', 'name': 'Over', 'point': br_line, 'price': br_o},
+                {'description': 'Nikola Jokic', 'name': 'Under', 'point': br_line, 'price': br_u}]}]},
+            {'key': 'pinnacle', 'markets': [{'key': 'player_points', 'outcomes': [
+                {'description': 'Nikola Jokic', 'name': 'Over', 'point': pin_line, 'price': pin_o},
+                {'description': 'Nikola Jokic', 'name': 'Under', 'point': pin_line, 'price': pin_u}]}]},
+        ]}]
+# FD way off vs BR+Pinnacle at a DIFFERENT line: only translation can catch it
+g = prop_game(24.5, +150, -190, 25.5, -125, -105, 25.5, -128, -102)
+opps_t = wa.analyze_player_props(g, 'NBA Points', market_key='player_points')
+fd_flags = [o for o in opps_t if o['book_key'] == 'fanduel' and o['recommendation'].startswith('OVER')]
+check('derived-line consensus flags cross-line mispricing', len(fd_flags) >= 1,
+      str([(o['book_key'], o['recommendation'], o['edge']) for o in opps_t]))
+if fd_flags:
+    check('derived flag labeled', 'derived-line' in fd_flags[0]['label2_name'],
+          fd_flags[0]['label2_name'])
+
 print()
 if FAIL:
     print(f"❌ {len(FAIL)} failures: {FAIL}")
