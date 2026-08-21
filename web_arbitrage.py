@@ -223,10 +223,97 @@ def log_debug(msg):
     print(line, flush=True)
 
 # ============================================================
-# DATABASE (CLV tracking)
+# DATABASE (opportunity log, CLV, graded results)
+#
+# Two backends, picked automatically:
+#   * DATABASE_URL set (postgres://...)  -> Postgres (e.g. free Neon tier).
+#     REQUIRED on Render: the instance filesystem is wiped on every deploy
+#     and every free-tier spin-up, so an on-disk SQLite file loses all
+#     history many times per day.
+#   * otherwise                          -> SQLite at DB_PATH (local dev).
 # ============================================================
 
+DATABASE_URL = (os.environ.get('DATABASE_URL', '') or '').strip()
+USE_PG = DATABASE_URL.startswith('postgres')
+if USE_PG:
+    import psycopg2
+    import psycopg2.extras
+
+_DT_NOW_RE = re.compile(r"datetime\('now',\s*'(-?\d+)\s*days?'\)")
+
+def _pg_sql(sql):
+    """Translate the app's SQLite dialect to Postgres. Only two things vary:
+    ? placeholders and datetime('now', ...) — timestamps are stored as ISO
+    TEXT in both backends, so string comparison behaves identically."""
+    def _now_repl(m):
+        dt = datetime.now() + timedelta(days=int(m.group(1)))
+        return "'" + dt.isoformat() + "'"
+    sql = sql.replace('%', '%%')          # literal % (e.g. '6%+') before %s below
+    sql = _DT_NOW_RE.sub(_now_repl, sql)
+    sql = sql.replace("datetime('now')", "'" + datetime.now().isoformat() + "'")
+    return sql.replace('?', '%s')
+
+class _PgConn:
+    """Duck-types the sqlite3.Connection surface this app uses.
+    DictCursor rows behave like sqlite3.Row: row[0], row['col'], dict(row)."""
+    def __init__(self, dsn):
+        self.raw = psycopg2.connect(dsn, cursor_factory=psycopg2.extras.DictCursor,
+                                    connect_timeout=10)
+    def execute(self, sql, params=()):
+        cur = self.raw.cursor()
+        cur.execute(_pg_sql(sql), params)
+        return cur
+    def commit(self):
+        self.raw.commit()
+    def rollback(self):
+        try: self.raw.rollback()
+        except Exception: pass
+    def close(self):
+        try: self.raw.close()
+        except Exception: pass
+
+_PG_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS opportunities (
+        id SERIAL PRIMARY KEY,
+        scan_id TEXT,
+        scan_time TEXT NOT NULL,
+        commence_time TEXT,
+        sport TEXT, market TEXT, player TEXT, game TEXT, book TEXT,
+        bet_type TEXT, recommendation TEXT,
+        line REAL, odds INTEGER, edge REAL, fair_prob REAL, target_prob REAL,
+        kelly_fraction REAL, consensus_books INTEGER,
+        closing_odds INTEGER, clv REAL, result TEXT,
+        sport_key TEXT, event_id TEXT, settled_at TEXT, pnl REAL,
+        clv_captured_at TEXT
+    )
+"""
+
 def init_db():
+    if USE_PG:
+        try:
+            conn = _PgConn(DATABASE_URL)
+            conn.execute(_PG_SCHEMA)
+            conn.commit()
+            for mig in [
+                "ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS sport_key TEXT",
+                "ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS event_id TEXT",
+                "ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS settled_at TEXT",
+                "ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS pnl REAL",
+                "ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS clv_captured_at TEXT",
+                "CREATE INDEX IF NOT EXISTS idx_scan_time ON opportunities(scan_time)",
+                "CREATE INDEX IF NOT EXISTS idx_commence ON opportunities(commence_time)",
+                "CREATE INDEX IF NOT EXISTS idx_scan_id ON opportunities(scan_id)",
+            ]:
+                try:
+                    conn.execute(mig)
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+            conn.close()
+            print("DB: Postgres connected (persistent)", flush=True)
+        except Exception as e:
+            print(f"DB init error (postgres): {e}", flush=True)
+        return
     try:
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute("""
@@ -269,11 +356,26 @@ def init_db():
                     conn.execute(col_sql)
                 except sqlite3.OperationalError:
                     pass
+        if not DATABASE_URL:
+            print("DB: SQLite at " + DB_PATH + " — WARNING: on Render this is "
+                  "wiped every deploy/restart. Set DATABASE_URL for persistence.",
+                  flush=True)
     except Exception as e:
         print(f"DB init error: {e}", flush=True)
 
 @contextmanager
 def get_db():
+    if USE_PG:
+        conn = _PgConn(DATABASE_URL)
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
@@ -4216,7 +4318,7 @@ def diagnose():
         'api_keys_count': len(API_KEYS),
         'llm_enabled': LLM_PARSER_ENABLED,
         'kalshi_key_set': bool(KALSHI_API_KEY),
-        'db_path': DB_PATH,
+        'db_backend': 'postgres (persistent)' if USE_PG else f'sqlite {DB_PATH} (EPHEMERAL on Render)',
     }
     return jsonify(out)
 
@@ -4290,13 +4392,15 @@ def stats():
                        AVG(clv) as avg_clv, COUNT(clv) as clv_n
                 FROM opportunities GROUP BY day ORDER BY day DESC LIMIT 30
             """).fetchall()
+            # NOTE: no ROUND() in SQL — pg's ROUND(real, n) needs numeric
+            # casts and sqlite doesn't. Round in Python below instead.
             realized = conn.execute("""
                 SELECT bet_type, COUNT(*) as n,
                        SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) as wins,
                        SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) as losses,
                        SUM(CASE WHEN result='push' THEN 1 ELSE 0 END) as pushes,
-                       ROUND(SUM(pnl), 1) as total_pnl,
-                       ROUND(AVG(pnl), 2) as avg_pnl
+                       SUM(pnl) as total_pnl,
+                       AVG(pnl) as avg_pnl
                 FROM opportunities
                 WHERE result IN ('win','loss','push')
                 GROUP BY bet_type ORDER BY n DESC
@@ -4306,17 +4410,27 @@ def stats():
                             WHEN edge >= 4 THEN '4-6%'
                             WHEN edge >= 2 THEN '2-4%'
                             ELSE '<2%' END as bucket,
-                       COUNT(*) as n, ROUND(SUM(pnl), 1) as total_pnl,
-                       ROUND(AVG(pnl), 2) as avg_pnl
+                       COUNT(*) as n, SUM(pnl) as total_pnl,
+                       AVG(pnl) as avg_pnl
                 FROM opportunities
                 WHERE result IN ('win','loss','push')
                 GROUP BY bucket ORDER BY MIN(edge) DESC
             """).fetchall()
+            def _rnd(rows):
+                out = []
+                for r in rows:
+                    d = dict(r)
+                    if d.get('total_pnl') is not None:
+                        d['total_pnl'] = round(float(d['total_pnl']), 1)
+                    if d.get('avg_pnl') is not None:
+                        d['avg_pnl'] = round(float(d['avg_pnl']), 2)
+                    out.append(d)
+                return out
             return jsonify({
                 'total': total,
                 'with_clv': with_clv,
-                'realized': [dict(r) for r in realized],
-                'realized_edge': [dict(r) for r in realized_edge],
+                'realized': _rnd(realized),
+                'realized_edge': _rnd(realized_edge),
                 'overall_clv': dict(overall_clv) if overall_clv else {},
                 'by_type': [dict(r) for r in by_type],
                 'by_book': [dict(r) for r in by_book],
