@@ -199,6 +199,58 @@ check('sort: arb, cheap middle, dear middle, +EV',
       order == ['arbitrage', 'middle', 'middle', 'player_prop']
       and sample[1]['be_pct'] == 1.1, str(order))
 
+
+# ---------- 16. EXECUTION smoke tests (the timezone-bug lesson: these
+# functions must RUN, not just parse — network mocked out) ----------
+class _FakeResp:
+    def __init__(self, payload, code=200):
+        self._p, self.status_code = payload, code
+    def json(self):
+        return self._p
+
+_real_kget = wa.kalshi_get
+def _fake_kget(url, params=None, timeout=15):
+    if '/markets/KXTEST' in url:
+        return _FakeResp({'market': {'status': 'settled', 'result': 'yes'}})
+    return _FakeResp({'markets': [
+        {'ticker': 'KXMLBGAME-26AUG21NYYBOS-NYY',
+         'yes_sub_title': 'New York Y', 'close_time': '2099-01-01T00:00:00Z',
+         'yes_bid': 55, 'yes_ask': 57},
+    ], 'cursor': ''})
+wa.kalshi_get = _fake_kget
+try:
+    res = wa.fetch_kalshi_sports(log_fn=lambda m: None)
+    check('fetch_kalshi_sports executes without NameError', isinstance(res, dict)
+          and 'games' in res)
+except NameError as e:
+    check('fetch_kalshi_sports executes without NameError', False, str(e))
+finally:
+    wa.kalshi_get = _real_kget
+
+_real_req_get = wa.requests.get
+wa.requests.get = lambda *a, **k: _FakeResp({'events': []})
+wa.kalshi_get = _fake_kget
+try:
+    n = wa.grade_results(max_rows=1)
+    check('grade_results executes without NameError', isinstance(n, int))
+except NameError as e:
+    check('grade_results executes without NameError', False, str(e))
+finally:
+    wa.requests.get = _real_req_get
+    wa.kalshi_get = _real_kget
+
+try:
+    wa.kalshi_get = _fake_kget
+    out = wa._grade_kalshi_row({'event_id': 'KXTEST-1', 'recommendation': 'Buy YES at ~34c',
+                                'target_prob': 34.0})
+    check('kalshi settlement grading math', out is not None and out[0] == 'win'
+          and abs(out[1] - (100 * 0.66 / 0.34 - wa.kalshi_fee_pct(0.34))) < 0.1,
+          str(out))
+except NameError as e:
+    check('kalshi settlement grading math', False, str(e))
+finally:
+    wa.kalshi_get = _real_kget
+
 print()
 if FAIL:
     print(f"❌ {len(FAIL)} failures: {FAIL}")
