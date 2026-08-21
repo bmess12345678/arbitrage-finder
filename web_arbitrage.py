@@ -388,6 +388,18 @@ def get_db():
 def log_opportunity(opp, scan_id):
     try:
         with get_db() as conn:
+            # Forward-test hygiene: scans repeat every few minutes, so the same
+            # live edge would get logged dozens of times and overweight
+            # persistent (often stale) quotes in every downstream statistic.
+            # One row per unique bet per 12h = "the bet you'd actually place."
+            cutoff = (datetime.now() - timedelta(hours=12)).isoformat()
+            dup = conn.execute(
+                "SELECT 1 FROM opportunities WHERE player = ? AND game = ? "
+                "AND market = ? AND book = ? AND scan_time > ? LIMIT 1",
+                (opp.get('player', ''), opp.get('game', ''),
+                 opp.get('market', ''), opp.get('book', ''), cutoff)).fetchone()
+            if dup:
+                return
             conn.execute("""
                 INSERT INTO opportunities (scan_id, scan_time, commence_time, sport, market,
                     player, game, book, bet_type, recommendation, line, odds, edge,
@@ -1130,6 +1142,20 @@ def fetch_kalshi_sports(log_fn=None):
             full = codes.get(code)
             if not full:
                 continue
+            # Opponent from the event segment: trailing letters are the two
+            # team codes concatenated (e.g. ...1845BALWSH). Strip this
+            # market's code from either end; the remainder is the opponent.
+            opp_full = None
+            seg = parts[0].rsplit('-', 1)[-1]
+            pm = re.search(r'([A-Z]+)$', seg)
+            if pm:
+                pair = pm.group(1)
+                if pair.endswith(code) and len(pair) > len(code):
+                    opp_full = codes.get(pair[:-len(code)])
+                elif pair.startswith(code) and len(pair) > len(code):
+                    opp_full = codes.get(pair[len(code):])
+            if not opp_full or opp_full == full:
+                continue          # can't verify the matchup -> don't poison
             ct = mkt.get('close_time', '') or ''
             try:
                 close_dt = datetime.fromisoformat(ct.replace('Z', '+00:00'))
@@ -1144,7 +1170,8 @@ def fetch_kalshi_sports(log_fn=None):
             prev = games_close.get(full)
             if prev is None or close_dt < prev:   # earliest game per team (doubleheaders)
                 games_close[full] = close_dt
-                result['games'][full] = mid
+                result['games'][full] = {'p': mid, 'opp': opp_full,
+                                         'end': ct[:19]}
                 hit += 1
         if mkts or hit:
             log(f"  Kalshi {series}: {len(mkts)} singles, {hit} priced games")
@@ -1245,8 +1272,25 @@ def fetch_polymarket_sports(log_fn=None):
             is_futures = any(kw in q_low for kw in [
                 'championship', 'champion', ' title', 'finals mvp', 'season',
                 'mvp', 'award', 'division', 'conference', 'draft', 'rookie of',
-                'coach of', 'win the world series', 'make the playoffs'])
+                'coach of', 'win the world series', 'make the playoffs',
+                'super bowl', 'stanley cup', 'win total', 'more wins',
+                'finishes higher', 'regular season'])
             if is_futures:
+                continue
+
+            # A market only enters the consensus if we know BOTH teams and the
+            # market resolves within the next ~8 days. Season-long head-to-heads
+            # ("Browns vs Jets: more wins?") and unrelated team markets keyed by
+            # name alone were poisoning game consensus with 3x-weight garbage.
+            end_iso = (m.get('endDate') or m.get('end_date') or '')[:19]
+            end_ok = False
+            if end_iso:
+                try:
+                    end_dt = datetime.fromisoformat(end_iso.replace('Z', ''))
+                    end_ok = -1 <= (end_dt - datetime.now()).days <= 8
+                except Exception:
+                    end_ok = False
+            if not end_ok:
                 continue
 
             # Shape A: outcomes ARE team names (moneyline market)
@@ -1257,14 +1301,15 @@ def fetch_polymarket_sports(log_fn=None):
             if f0 and f1 and f0 != f1:
                 candidates += 1
                 if 0.02 < p0 < 0.98:
-                    result['games'][f0] = p0
+                    result['games'][f0] = {'p': p0, 'opp': f1, 'end': end_iso}
                     sports_count += 1
                 if 0.02 < p1 < 0.98:
-                    result['games'][f1] = p1
+                    result['games'][f1] = {'p': p1, 'opp': f0, 'end': end_iso}
                     sports_count += 1
                 continue
 
-            # Shape B: "Will the X beat/win against Y ...?"
+            # Shape B: "Will the X beat/win against Y ...?" — opponent must
+            # resolve to a known team or the market is discarded entirely.
             if 0.02 < p0 < 0.98:
                 gm = re.search(
                     r'(?:will|do|does)\s+(?:the\s+)?(.+?)\s+'
@@ -1272,12 +1317,13 @@ def fetch_polymarket_sports(log_fn=None):
                     q_low)
                 if gm:
                     team_str, opp_str = gm.group(1).strip(), gm.group(2).strip()
-                    home = next((full for key, full in all_teams.items()
+                    team = next((full for key, full in all_teams.items()
                                  if key in team_str), None)
-                    has_opp = any(key in opp_str for key in all_teams)
-                    if home and has_opp:
+                    opp = next((full for key, full in all_teams.items()
+                                if key in opp_str), None)
+                    if team and opp and team != opp:
                         candidates += 1
-                        result['games'][home] = p0
+                        result['games'][team] = {'p': p0, 'opp': opp, 'end': end_iso}
                         sports_count += 1
 
         log(f"  Polymarket: {len(markets)} markets, {candidates} candidates, "
@@ -1346,17 +1392,28 @@ def analyze_game_markets(games_data, market_name="", poly_games=None, kalshi_gam
             if home_key and away_key:
                 break
 
+        def _ex_prob(exchange_data, team, required_opp):
+            """Exchange win-prob for `team`, but ONLY if the stored market's
+            opponent is verifiably `required_opp`. Name-only matching let a
+            Browns season market masquerade as Browns@Jaguars at 3x weight."""
+            e = exchange_data.get(team)
+            if not isinstance(e, dict):
+                return None               # legacy/float entries: reject
+            if e.get('opp') != required_opp:
+                return None
+            return e.get('p')
+
         for exchange_name, exchange_data in [('kalshi', kalshi_games), ('polymarket', poly_games)]:
             if not exchange_data:
                 continue
-            ex_home = exchange_data.get(home)
-            ex_away = exchange_data.get(away)
-            if ex_home and home_key and away_key:
+            ex_home = _ex_prob(exchange_data, home, away)
+            ex_away = _ex_prob(exchange_data, away, home)
+            if ex_home is not None and home_key and away_key:
                 book_devigged[exchange_name] = {
                     home_key: clamp_prob(ex_home),
                     away_key: clamp_prob(1.0 - ex_home),
                 }
-            elif ex_away and home_key and away_key:
+            elif ex_away is not None and home_key and away_key:
                 book_devigged[exchange_name] = {
                     away_key: clamp_prob(ex_away),
                     home_key: clamp_prob(1.0 - ex_away),
@@ -1455,6 +1512,89 @@ def analyze_game_markets(games_data, market_name="", poly_games=None, kalshi_gam
 # PLAYER PROP ANALYSIS
 # ============================================================
 
+
+# ---------------- Derivative prop pricing (line translation) ----------------
+# (shape, coefficient-of-variation). Counts use Poisson; volume stats use a
+# normal with sd = cv * mean. CVs are conservative public-domain estimates —
+# translation is interpolation between market quotes, not origination.
+PROP_DIST = {
+    'player_points': ('normal', 0.32), 'player_rebounds': ('normal', 0.42),
+    'player_assists': ('normal', 0.48), 'player_pass_yds': ('normal', 0.28),
+    'player_rush_yds': ('normal', 0.52),
+    'player_receptions': ('poisson', None), 'player_strikeouts': ('poisson', None),
+    'player_shots_on_goal': ('poisson', None), 'player_threes': ('poisson', None),
+    'player_total_bases': ('poisson', None),
+}
+MAX_TRANSLATE_FRAC = float(os.environ.get('MAX_TRANSLATE_FRAC', '0.25'))
+DERIVED_SHRINK = float(os.environ.get('DERIVED_SHRINK', '0.75'))
+MIN_EDGE_DERIVED = float(os.environ.get('MIN_EDGE_DERIVED', '2.0'))
+
+def _phi(z):
+    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+def _phi_inv(p):
+    """Inverse standard normal CDF via bisection — slow but exact enough
+    and dependency-free at this volume."""
+    p = min(max(p, 1e-9), 1 - 1e-9)
+    lo, hi = -8.0, 8.0
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        if _phi(mid) < p:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+def _pois_sf(lam, k):
+    """P(X >= k) for Poisson(lam)."""
+    if k <= 0:
+        return 1.0
+    term, cdf = math.exp(-lam), math.exp(-lam)
+    for i in range(1, k):
+        term *= lam / i
+        cdf += term
+        if term < 1e-15 and i > lam:
+            break
+    return max(0.0, min(1.0, 1.0 - cdf))
+
+def translate_prop_prob(market_key, from_line, over_prob, to_line):
+    """Implied P(over to_line) given the market says P(over from_line)=over_prob.
+    Returns None when the stat type is unknown, the hop is too far to trust,
+    or the quote is too extreme to invert stably."""
+    if from_line == to_line:
+        return over_prob
+    spec = PROP_DIST.get(market_key)
+    if not spec:
+        return None
+    if not (0.05 < over_prob < 0.95):
+        return None
+    ref = max(abs(from_line), abs(to_line), 3.0)
+    if abs(from_line - to_line) > MAX_TRANSLATE_FRAC * ref:
+        return None
+    shape, cv = spec
+    if shape == 'normal':
+        z = _phi_inv(1.0 - over_prob)          # (L1 - mu)/sigma
+        denom = 1.0 + z * cv
+        if denom < 0.25:
+            return None
+        mu = from_line / denom
+        if mu <= 0:
+            return None
+        sigma = cv * mu
+        return max(0.0, min(1.0, 1.0 - _phi((to_line - mu) / sigma)))
+    # Poisson: half-lines only (integer lines can push; don't translate them)
+    if abs(from_line % 1 - 0.5) > 0.01 or abs(to_line % 1 - 0.5) > 0.01:
+        return None
+    k1, k2 = int(from_line) + 1, int(to_line) + 1
+    lo, hi = 0.01, 80.0
+    for _ in range(60):
+        lam = (lo + hi) / 2
+        if _pois_sf(lam, k1) < over_prob:
+            lo = lam
+        else:
+            hi = lam
+    return _pois_sf((lo + hi) / 2, k2)
+
 def analyze_player_props(games_data, market_name="", kalshi_props=None, poly_props=None, market_key=""):
     if not games_data:
         return []
@@ -1521,13 +1661,9 @@ def analyze_player_props(games_data, market_name="", kalshi_props=None, poly_pro
                 line_groups[rounded][bk] = bdata
 
             for line_val, group_books in line_groups.items():
-                if len(group_books) < 2:   # was 3
-                    stats['diff_line'] += 1
-                    continue
-                stats['same_line'] += 1
-
                 devigged = {}
                 juice_map = {}
+                translated = set()
                 for bk, bdata in group_books.items():
                     ov = american_to_implied(bdata['over_odds'])
                     un = american_to_implied(bdata['under_odds'])
@@ -1535,21 +1671,56 @@ def analyze_player_props(games_data, market_name="", kalshi_props=None, poly_pro
                     fo, fu = devig_pair(ov, un)
                     devigged[bk] = {'over': clamp_prob(fo), 'under': clamp_prob(fu)}
 
-                if kalshi_props and market_key:
-                    norm = normalize_player_name(player)
-                    if norm in kalshi_props and market_key in kalshi_props[norm]:
-                        k_lines = kalshi_props[norm][market_key]
-                        if line_val in k_lines:
-                            k_over = clamp_prob(k_lines[line_val])
-                            devigged['kalshi'] = {'over': k_over, 'under': 1.0 - k_over}
+                # Derivative pricing: pull in books quoting OTHER lines by
+                # translating their devigged prob to this line, shrunk toward
+                # 50% to price in model risk. Their own posted odds are never
+                # evaluated here — translated quotes are consensus-only.
+                for bk, bdata in books_with_both.items():
+                    if bk in group_books:
+                        continue
+                    t = translate_prop_prob(market_key, bdata['line'],
+                                            devig_pair(
+                                                american_to_implied(bdata['over_odds']),
+                                                american_to_implied(bdata['under_odds']))[0],
+                                            line_val)
+                    if t is None:
+                        continue
+                    t = 0.5 + DERIVED_SHRINK * (clamp_prob(t) - 0.5)
+                    devigged[bk] = {'over': t, 'under': 1.0 - t}
+                    translated.add(bk)
 
-                if poly_props and market_key:
+                def _exchange_join(src_props, name):
+                    if not src_props or not market_key:
+                        return
                     norm = normalize_player_name(player)
-                    if norm in poly_props and market_key in poly_props[norm]:
-                        p_lines = poly_props[norm][market_key]
-                        if line_val in p_lines:
-                            p_over = clamp_prob(p_lines[line_val])
-                            devigged['polymarket'] = {'over': p_over, 'under': 1.0 - p_over}
+                    lines_d = (src_props.get(norm) or {}).get(market_key) or {}
+                    if not lines_d:
+                        return
+                    if line_val in lines_d:
+                        p_over = clamp_prob(lines_d[line_val])
+                        devigged[name] = {'over': p_over, 'under': 1.0 - p_over}
+                        return
+                    # nearest strike, translated
+                    near = min(lines_d.keys(), key=lambda L: abs(L - line_val))
+                    t = translate_prop_prob(market_key, near,
+                                            clamp_prob(lines_d[near]), line_val)
+                    if t is not None:
+                        t = 0.5 + DERIVED_SHRINK * (clamp_prob(t) - 0.5)
+                        devigged[name] = {'over': t, 'under': 1.0 - t}
+                        translated.add(name)
+
+                _exchange_join(kalshi_props, 'kalshi')
+                _exchange_join(poly_props, 'polymarket')
+
+                if len(devigged) < 2:
+                    stats['diff_line'] += 1
+                    continue
+                if translated and len(group_books) >= 2:
+                    stats['same_line'] += 1
+                elif translated:
+                    stats['diff_line'] += 1     # group rescued by translation
+                else:
+                    stats['same_line'] += 1
 
                 exchange_books = [b for b in ['kalshi', 'polymarket'] if b in devigged]
                 eval_candidates = list(group_books.keys()) + exchange_books
@@ -1617,7 +1788,11 @@ def analyze_player_props(games_data, market_name="", kalshi_props=None, poly_pro
                     ]:
                         net_edge = (consensus_fair - eval_imp) * 100
                         gross_edge = (consensus_fair - eval_fair) * 100
-                        if net_edge < MIN_EDGE_NET or net_edge > MAX_EDGE_NET:
+                        n_exact_others = sum(1 for b in devigged
+                                             if b != eval_book and b not in translated)
+                        edge_floor = MIN_EDGE_NET if n_exact_others >= 2 else \
+                            max(MIN_EDGE_NET, MIN_EDGE_DERIVED)
+                        if net_edge < edge_floor or net_edge > MAX_EDGE_NET:
                             continue
 
                         fair_odds = implied_to_american(consensus_fair)
@@ -1634,7 +1809,10 @@ def analyze_player_props(games_data, market_name="", kalshi_props=None, poly_pro
                             'line': line_val,
                             'label1_name': f'{BOOK_DISPLAY.get(eval_book, eval_book)} Odds',
                             'label1_value': format_american(odds),
-                            'label2_name': f'Fair Odds ({len(other_over_fairs)} books)',
+                            'label2_name': (f'Fair Odds ({len(other_over_fairs)} books'
+                                            + (f', {sum(1 for b in devigged if b != eval_book and b in translated)} derived-line)'
+                                               if any(b in translated for b in devigged if b != eval_book)
+                                               else ')')),
                             'label2_value': format_american(fair_odds),
                             'label3_name': 'Net Edge', 'label3_value': f"+{net_edge:.1f}%",
                             'target_prob': round(eval_imp * 100, 1),
@@ -2431,6 +2609,7 @@ def fetch_weather_opps():
         ('Denver', 'high'):  (-0.81, 2.3), ('Denver', 'low'): (-1.15, 2.9),
     }
     opportunities = []
+    calib_rows = []
     try:
         # Coordinates = the NWS station each Kalshi market SETTLES on (per the
         # contract 'About' text), NOT city center: NYC->KLGA, Chicago->KMDW,
@@ -2570,6 +2749,24 @@ def fetch_weather_opps():
                 edge_no = (yb_p - model_prob) * 100 if yb_p is not None else -999.0
                 matched_count += 1
 
+                if 0 < k_mid < 1:
+                    calib_rows.append({
+                        'sport_key': 'kalshi_weather',
+                        'event_id': mkt.get('ticker', ''),
+                        'player': f"CALIB {city_key.upper()} {kind} {settle} {mkt.get('ticker','')[-12:]}",
+                        'game': 'model-vs-market calibration',
+                        'commence': '', 'market': 'Weather Calib',
+                        'book': 'Kalshi', 'book_key': 'kalshi',
+                        'type': 'weather_calib',
+                        'edge': round((model_prob - k_mid) * 100, 1),
+                        'recommendation': 'CALIB YES',
+                        'odds': round(implied_to_american(k_mid)),
+                        'line': 0,
+                        'target_prob': round(k_mid * 100, 1),
+                        'fair_prob': round(model_prob * 100, 1),
+                        'kelly_fraction': 0, 'consensus_books': 0,
+                    })
+
                 if edge_yes >= edge_no:
                     side, display_edge, side_prob = 'YES', edge_yes, model_prob
                     side_price = ya_p if ya_p is not None else k_mid
@@ -2627,7 +2824,7 @@ def fetch_weather_opps():
                 })
             except Exception:
                 continue
-        opportunities = _dedup_weather(opportunities)
+        opportunities = _dedup_weather(opportunities) + calib_rows
         log_debug(f"  Weather: {matched_count} compared, {len(opportunities)} fee-adj edges \u2265 {WEATHER_MIN_EDGE:g}% "
                   f"({skipped_today} same-day/past skipped)")
     except Exception as e:
@@ -3128,7 +3325,11 @@ def scan_markets():
     # ---- Weather ----
     log_debug("--- Weather (Ensemble Model) ---")
     try:
-        all_opps.extend(fetch_weather_opps())
+        _w = fetch_weather_opps()
+        _wc = [o for o in _w if o.get('type') == 'weather_calib']
+        for _c in _wc:
+            log_opportunity(_c, scan_id)
+        all_opps.extend([o for o in _w if o.get('type') != 'weather_calib'])
     except Exception as e:
         log_debug(f"  Weather failed: {e}")
 
@@ -3511,7 +3712,7 @@ def grade_results(max_rows=250):
                        bet_type, recommendation, commence_time, target_prob, scan_time
                 FROM opportunities
                 WHERE (result IS NULL OR result = '')
-                  AND bet_type IN ('game_market', 'weather', 'economic')
+                  AND bet_type IN ('game_market', 'weather', 'economic', 'weather_calib')
                   AND scan_time > datetime('now', '-30 days')
                 ORDER BY id DESC LIMIT ?
             """, (max_rows,)).fetchall()
@@ -3519,7 +3720,7 @@ def grade_results(max_rows=250):
             for row in rows:
                 res = pnl = None
                 bt = row['bet_type']
-                if bt in ('weather', 'economic'):
+                if bt in ('weather', 'economic', 'weather_calib'):
                     out = _grade_kalshi_row(row)
                     if out:
                         res, pnl = out
@@ -4404,6 +4605,7 @@ def stats():
                        AVG(pnl) as avg_pnl
                 FROM opportunities
                 WHERE result IN ('win','loss','push')
+                  AND bet_type != 'weather_calib'
                 GROUP BY bet_type ORDER BY n DESC
             """).fetchall()
             realized_edge = conn.execute("""
@@ -4415,6 +4617,7 @@ def stats():
                        AVG(pnl) as avg_pnl
                 FROM opportunities
                 WHERE result IN ('win','loss','push')
+                  AND bet_type != 'weather_calib'
                 GROUP BY bucket ORDER BY MIN(edge) DESC
             """).fetchall()
             def _rnd(rows):
@@ -4427,9 +4630,36 @@ def stats():
                         d['avg_pnl'] = round(float(d['avg_pnl']), 2)
                     out.append(d)
                 return out
+            graded_rows = conn.execute("""
+                SELECT settled_at, scan_time, pnl, kelly_fraction
+                FROM opportunities
+                WHERE result IN ('win','loss','push') AND pnl IS NOT NULL
+                  AND bet_type != 'weather_calib'
+                ORDER BY COALESCE(settled_at, scan_time)
+            """).fetchall()
+            bk = float(os.environ.get('DEFAULT_BANKROLL', '3000'))
+            start_bk, peak, max_dd = bk, bk, 0.0
+            n_sized = 0
+            for r in graded_rows:
+                kf = min(max(float(r['kelly_fraction'] or 0), 0.0), 5.0) / 100.0
+                if kf <= 0:
+                    continue
+                n_sized += 1
+                stake = bk * kf
+                bk += stake * (float(r['pnl']) / 100.0)
+                peak = max(peak, bk)
+                if peak > 0:
+                    max_dd = max(max_dd, (peak - bk) / peak * 100.0)
+            bankroll_sim = {
+                'start': round(start_bk, 2), 'end': round(bk, 2),
+                'return_pct': round((bk / start_bk - 1) * 100, 1) if start_bk else 0,
+                'max_drawdown_pct': round(max_dd, 1),
+                'n_bets': n_sized,
+            }
             return jsonify({
                 'total': total,
                 'with_clv': with_clv,
+                'bankroll_sim': bankroll_sim,
                 'realized': _rnd(realized),
                 'realized_edge': _rnd(realized_edge),
                 'overall_clv': dict(overall_clv) if overall_clv else {},
