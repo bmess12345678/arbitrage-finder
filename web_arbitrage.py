@@ -98,6 +98,7 @@ MAX_EDGE_POINT = float(os.environ.get('MAX_EDGE_POINT', '8'))
 MIDDLE_MAX_COST = float(os.environ.get('MIDDLE_MAX_COST', '3.0'))
 MIDDLE_MIN_GAP = float(os.environ.get('MIDDLE_MIN_GAP', '1.0'))
 WEATHER_MIN_EDGE = float(os.environ.get('WEATHER_MIN_EDGE', '5'))  # fee-adjusted
+EXCHANGE_MAX_DIVERGENCE = float(os.environ.get('EXCHANGE_MAX_DIVERGENCE', '0.12'))
 
 # ============================================================
 # AFFILIATE LINKS (set these env vars to activate; left blank = no link shown)
@@ -1136,6 +1137,8 @@ def fetch_kalshi_sports(log_fn=None):
     for series, codes in KALSHI_GAME_SERIES:
         mkts = _kalshi_series_markets(series, log)
         hit = 0
+        skip = {'code': 0, 'opp': 0, 'window': 0, 'unpriced': 0}
+        sample = ''
         for mkt in mkts:
             tick = mkt.get('ticker', '') or ''
             parts = tick.rsplit('-', 1)
@@ -1144,6 +1147,9 @@ def fetch_kalshi_sports(log_fn=None):
             code = parts[1].strip().upper()
             full = codes.get(code)
             if not full:
+                skip['code'] += 1
+                if not sample:
+                    sample = tick
                 continue
             # Opponent from the event segment: trailing letters are the two
             # team codes concatenated (e.g. ...1845BALWSH). Strip this
@@ -1158,6 +1164,9 @@ def fetch_kalshi_sports(log_fn=None):
                 elif pair.startswith(code) and len(pair) > len(code):
                     opp_full = codes.get(pair[len(code):])
             if not opp_full or opp_full == full:
+                skip['opp'] += 1
+                if not sample:
+                    sample = tick
                 continue          # can't verify the matchup -> don't poison
             ct = mkt.get('close_time', '') or ''
             try:
@@ -1165,19 +1174,29 @@ def fetch_kalshi_sports(log_fn=None):
             except Exception:
                 continue
             if not (now < close_dt < horizon):
+                skip['window'] += 1
+                if not sample:
+                    sample = f"{tick} close={ct[:16]}"
                 continue                      # only near-term games; avoids stale/futures
             yb, ya, lp = kalshi_prices(mkt)
             mid = (((yb + ya) / 2) if yb > 0 and ya > 0 else (yb or ya or lp)) / 100.0
             if not (0.03 < mid < 0.97):
+                skip['unpriced'] += 1
+                if not sample:
+                    sample = tick
                 continue
             prev = games_close.get(full)
             if prev is None or close_dt < prev:   # earliest game per team (doubleheaders)
                 games_close[full] = close_dt
                 result['games'][full] = {'p': mid, 'opp': opp_full,
-                                         'end': ct[:19]}
+                                         'end': ct[:19], 'src': tick}
                 hit += 1
         if mkts or hit:
             log(f"  Kalshi {series}: {len(mkts)} singles, {hit} priced games")
+            if mkts and hit == 0:
+                log(f"    skips: {skip['code']} unknown-code, {skip['opp']} opp-parse, "
+                    f"{skip['window']} close-window, {skip['unpriced']} unpriced"
+                    + (f" | e.g. {sample}" if sample else ''))
         time.sleep(0.35)
 
     games_matched = len(result['games'])
@@ -1304,10 +1323,10 @@ def fetch_polymarket_sports(log_fn=None):
             if f0 and f1 and f0 != f1:
                 candidates += 1
                 if 0.02 < p0 < 0.98:
-                    result['games'][f0] = {'p': p0, 'opp': f1, 'end': end_iso}
+                    result['games'][f0] = {'p': p0, 'opp': f1, 'end': end_iso, 'src': q[:80]}
                     sports_count += 1
                 if 0.02 < p1 < 0.98:
-                    result['games'][f1] = {'p': p1, 'opp': f0, 'end': end_iso}
+                    result['games'][f1] = {'p': p1, 'opp': f0, 'end': end_iso, 'src': q[:80]}
                     sports_count += 1
                 continue
 
@@ -1326,7 +1345,7 @@ def fetch_polymarket_sports(log_fn=None):
                                 if key in opp_str), None)
                     if team and opp and team != opp:
                         candidates += 1
-                        result['games'][team] = {'p': p0, 'opp': opp, 'end': end_iso}
+                        result['games'][team] = {'p': p0, 'opp': opp, 'end': end_iso, 'src': q[:80]}
                         sports_count += 1
 
         log(f"  Polymarket: {len(markets)} markets, {candidates} candidates, "
@@ -1406,17 +1425,51 @@ def analyze_game_markets(games_data, market_name="", poly_games=None, kalshi_gam
                 return None
             return e.get('p')
 
+        # Books-only consensus for the home side — the sanity anchor for
+        # exchange overlays. Weighted, Pinnacle 3x, exchanges excluded.
+        _bk_probs, _bk_wts = [], []
+        if home_key:
+            for _bk, _dv in book_devigged.items():
+                if _bk in ('kalshi', 'polymarket'):
+                    continue
+                if home_key in _dv:
+                    _bk_probs.append(_dv[home_key])
+                    _bk_wts.append(get_weight(_bk))
+        book_home_consensus = (sum(p * w for p, w in zip(_bk_probs, _bk_wts))
+                               / sum(_bk_wts)) if _bk_wts else None
+
+        def _divergent(ex_p_home, src_label):
+            """True (and logged) when an exchange home-prob is implausibly far
+            from the book consensus — a wrong-quantity market (series line,
+            doubleheader leg, stale/live price) that passed identity checks."""
+            if book_home_consensus is None:
+                return False
+            gap = abs(ex_p_home - book_home_consensus)
+            if gap > EXCHANGE_MAX_DIVERGENCE:
+                log_debug(f"    ⚠️ {src_label} rejected for {away} @ {home}: "
+                          f"exchange {ex_p_home*100:.0f}% vs books "
+                          f"{book_home_consensus*100:.0f}% "
+                          f"(gap {gap*100:.0f}pp > {EXCHANGE_MAX_DIVERGENCE*100:.0f}pp)")
+                return True
+            return False
+
         for exchange_name, exchange_data in [('kalshi', kalshi_games), ('polymarket', poly_games)]:
             if not exchange_data:
                 continue
             ex_home = _ex_prob(exchange_data, home, away)
             ex_away = _ex_prob(exchange_data, away, home)
+            _src_h = (exchange_data.get(home) or {}).get('src', '') if isinstance(exchange_data.get(home), dict) else ''
+            _src_a = (exchange_data.get(away) or {}).get('src', '') if isinstance(exchange_data.get(away), dict) else ''
             if ex_home is not None and home_key and away_key:
+                if _divergent(ex_home, f"{exchange_name} [{_src_h[:60]}]"):
+                    continue
                 book_devigged[exchange_name] = {
                     home_key: clamp_prob(ex_home),
                     away_key: clamp_prob(1.0 - ex_home),
                 }
             elif ex_away is not None and home_key and away_key:
+                if _divergent(1.0 - ex_away, f"{exchange_name} [{_src_a[:60]}]"):
+                    continue
                 book_devigged[exchange_name] = {
                     away_key: clamp_prob(ex_away),
                     home_key: clamp_prob(1.0 - ex_away),
@@ -1652,7 +1705,14 @@ def analyze_player_props(games_data, market_name="", kalshi_props=None, poly_pro
 
             books_with_both = {bk: bdata for bk, bdata in books.items()
                                if 'over_odds' in bdata and 'under_odds' in bdata}
-            if len(books_with_both) < 2:   # was 3
+            _norm_p = normalize_player_name(player)
+            _has_exchange = any(
+                _norm_p in (srcp or {}) and market_key in (srcp or {}).get(_norm_p, {})
+                for srcp in (kalshi_props, poly_props))
+            # One book vs a 3x-weight exchange quote is exactly the
+            # book-vs-Kalshi prop comparison this scanner exists for; requiring
+            # two BOOKS silently discarded every such player.
+            if len(books_with_both) < (1 if _has_exchange else 2):
                 stats['too_few_books'] += 1
                 continue
 
@@ -1793,8 +1853,11 @@ def analyze_player_props(games_data, market_name="", kalshi_props=None, poly_pro
                         gross_edge = (consensus_fair - eval_fair) * 100
                         n_exact_others = sum(1 for b in devigged
                                              if b != eval_book and b not in translated)
+                        n_others = sum(1 for b in devigged if b != eval_book)
                         edge_floor = MIN_EDGE_NET if n_exact_others >= 2 else \
                             max(MIN_EDGE_NET, MIN_EDGE_DERIVED)
+                        if n_others < 2:
+                            edge_floor = max(edge_floor, MIN_EDGE_DERIVED)
                         if net_edge < edge_floor or net_edge > MAX_EDGE_NET:
                             continue
 
@@ -2827,8 +2890,10 @@ def fetch_weather_opps():
                 })
             except Exception:
                 continue
-        opportunities = _dedup_weather(opportunities) + calib_rows
-        log_debug(f"  Weather: {matched_count} compared, {len(opportunities)} fee-adj edges \u2265 {WEATHER_MIN_EDGE:g}% "
+        opportunities = _dedup_weather(opportunities)
+        n_real = len(opportunities)
+        opportunities = opportunities + calib_rows
+        log_debug(f"  Weather: {matched_count} compared, {n_real} fee-adj edges \u2265 {WEATHER_MIN_EDGE:g}% "
                   f"({skipped_today} same-day/past skipped)")
     except Exception as e:
         log_debug(f"  Weather error: {e}")
@@ -4469,8 +4534,6 @@ def get_opportunities():
     warnings = []
     if not API_KEYS and not providers.ENABLED:
         warnings.append('No odds sources: direct feeds disabled and no ODDS_API_KEYS set.')
-    if not LLM_PARSER_ENABLED:
-        warnings.append('LLM Kalshi parser disabled — set ANTHROPIC_API_KEY for better Kalshi parsing.')
     with _state_lock:
         return jsonify({
             'opportunities': state['opportunities'],
