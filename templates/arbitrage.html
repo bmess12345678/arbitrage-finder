@@ -1095,6 +1095,28 @@
                         </div></div>`;
                 }
 
+                // Compounded bankroll simulation
+                let bkHtml = '';
+                const bs = data.bankroll_sim || null;
+                if (bs && bs.n_bets > 0) {
+                    const c = bs.return_pct >= 0 ? '#48bb78' : '#ff4757';
+                    bkHtml = `
+                        <div class="stats-section" style="border-left:4px solid ${c};">
+                            <h3>Bankroll Simulation (compounded at suggested stakes)</h3>
+                            <div style="font-size:0.9em; margin-top:8px;">
+                                $${bs.start.toLocaleString()} → <strong style="color:${c};">$${bs.end.toLocaleString()}</strong>
+                                <span style="color:${c}; font-weight:700;"> (${bs.return_pct >= 0 ? '+' : ''}${bs.return_pct}%)</span>
+                                <span style="color:#888;"> · max drawdown ${bs.max_drawdown_pct}% · ${bs.n_bets} sized bets</span>
+                            </div>
+                            <div style="font-size:0.75em; color:#888; margin-top:8px; line-height:1.5;">
+                                Every graded bet replayed in settlement order, staking the flagged Kelly % of the
+                                running bankroll (capped 5%). This answers "would the suggested sizes have grown the
+                                bankroll" — but it is the noisiest statistic here: judge edge by CLV first, flat-stake
+                                ROI second, and this curve only once it has hundreds of bets.
+                            </div>
+                        </div>`;
+                }
+
                 // Overall CLV hero
                 const oc = data.overall_clv || {};
                 const ocCount = oc.n || 0;
@@ -1159,6 +1181,7 @@
                         With CLV: <strong style="color:#fff;">${data.with_clv || 0}</strong>
                     </div>
                     ${realizedHtml}
+                    ${bkHtml}
                     ${clvHero}
                     <div class="stats-section">
                         <h3>By Type</h3>
