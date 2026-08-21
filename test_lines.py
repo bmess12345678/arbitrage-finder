@@ -345,6 +345,58 @@ if fd_flags:
     check('derived flag labeled', 'derived-line' in fd_flags[0]['label2_name'],
           fd_flags[0]['label2_name'])
 
+# ---------- 21. Exchange divergence guard ----------
+# Right game, right opponent, right date — but a wrong-quantity price
+# (series market / doubleheader leg / stale quote). Must be rejected.
+poly_poison = {'Atlanta Braves': {'p': 0.645, 'opp': 'Milwaukee Brewers',
+                                  'end': '2026-08-21', 'src': 'Braves vs. Brewers (series)'}}
+poly_sane = {'Atlanta Braves': {'p': 0.47, 'opp': 'Milwaukee Brewers',
+                                'end': '2026-08-21', 'src': 'Braves vs. Brewers'}}
+games_div = mk_v4({
+    'fanduel': [{'key': 'h2h', 'outcomes': [
+        {'name': 'Milwaukee Brewers', 'price': -148},
+        {'name': 'Atlanta Braves', 'price': +126}]}],
+    'pinnacle': [{'key': 'h2h', 'outcomes': [
+        {'name': 'Milwaukee Brewers', 'price': -145},
+        {'name': 'Atlanta Braves', 'price': +123}]}],
+    'betrivers': [{'key': 'h2h', 'outcomes': [
+        {'name': 'Milwaukee Brewers', 'price': -147},
+        {'name': 'Atlanta Braves', 'price': +123}]}],
+})
+games_div[0]['home_team'] = 'Milwaukee Brewers'
+games_div[0]['away_team'] = 'Atlanta Braves'
+o_poison = wa.analyze_game_markets(games_div, 'MLB Moneyline', poly_games=poly_poison)
+fd_braves = [o for o in o_poison if o['book_key'] == 'fanduel' and 'Braves' in o['player']]
+check('divergent exchange price rejected (no fake 8%+ edge)',
+      all(o['edge'] < 4 for o in fd_braves),
+      str([(o['player'], o['edge']) for o in fd_braves]))
+check('rejected exchange absent from consensus detail',
+      all(all(d.get('book') != 'Polymarket' for d in (o.get('consensus_detail') or []))
+          for o in o_poison))
+o_sane = wa.analyze_game_markets(games_div, 'MLB Moneyline', poly_games=poly_sane)
+used = any(any(d.get('book') == 'Polymarket' for d in (o.get('consensus_detail') or []))
+           for o in o_sane)
+check('plausible exchange price still joins consensus', used)
+
+# ---------- 22. Props: one book + exchange quote now analyzable ----------
+one_book_game = [{
+    'home_team': 'Las Vegas Aces', 'away_team': 'Seattle Storm',
+    'commence_time': '2026-08-22T00:00:00Z', 'id': 'evw1', 'sport_key': 'basketball_wnba',
+    'bookmakers': [
+        {'key': 'fanduel', 'markets': [{'key': 'player_points', 'outcomes': [
+            {'description': 'A. Wilson', 'name': 'Over', 'point': 22.5, 'price': +100},
+            {'description': 'A. Wilson', 'name': 'Under', 'point': 22.5, 'price': -130}]}]},
+    ]}]
+kp = {wa.normalize_player_name('A. Wilson'): {'player_points': {22.5: 0.62}}}
+opps_1b = wa.analyze_player_props(one_book_game, 'WNBA Points',
+                                  kalshi_props=kp, market_key='player_points')
+check('single book vs Kalshi prop flags', 
+      any(o['book_key'] == 'fanduel' and o['recommendation'].startswith('OVER')
+          and o['edge'] >= 2.0 for o in opps_1b),
+      str([(o.get('book_key'), o.get('recommendation'), o.get('edge')) for o in opps_1b]))
+no_ex = wa.analyze_player_props(one_book_game, 'WNBA Points', market_key='player_points')
+check('single book with NO exchange still skipped', len(no_ex) == 0, str(no_ex))
+
 print()
 if FAIL:
     print(f"❌ {len(FAIL)} failures: {FAIL}")
