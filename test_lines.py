@@ -397,6 +397,96 @@ check('single book vs Kalshi prop flags',
 no_ex = wa.analyze_player_props(one_book_game, 'WNBA Points', market_key='player_points')
 check('single book with NO exchange still skipped', len(no_ex) == 0, str(no_ex))
 
+
+# ---------- 23. Hardened name normalization ----------
+np = wa.normalize_player_name
+check('apostrophe-insensitive', np("A'ja Wilson") == np("Aja Wilson"))
+check('accent-insensitive', np("Le\u00efla Lacan") == np("Leila Lacan"))
+check('suffix+period stripped', np("Ken Griffey Jr.") == np("Ken Griffey"))
+
+# ---------- 24. Kalshi window covers settlement-style close times ----------
+_far = (_dtm.now(_tzn.utc) + _tdl(days=4)).strftime('%Y-%m-%dT%H:%M:%SZ')
+def _kget_far(url, params=None, timeout=15):
+    return _FakeResp({'markets': [
+        {'ticker': 'KXMLBGAME-26AUG211910ATLMIL-MIL', 'close_time': _far,
+         'yes_bid': 55, 'yes_ask': 57},
+    ], 'cursor': ''})
+_rk = wa.kalshi_get
+wa.kalshi_get = _kget_far
+try:
+    kr = wa.fetch_kalshi_sports(log_fn=lambda m: None)
+    mil = kr['games'].get('Milwaukee Brewers')
+    check('close_time = game+3d now inside window',
+          isinstance(mil, dict) and mil['opp'] == 'Atlanta Braves', str(kr['games']))
+finally:
+    wa.kalshi_get = _rk
+
+# ---------- 25. Origination model: game lines -> player points ----------
+import time as _t
+wa._FORM_CACHE['basketball_wnba'] = {
+    'ts': _t.time(),
+    'players': {
+        wa.normalize_player_name("A'ja Wilson"): {'g': 8, 'pts_pg': 22.0,
+                                                  'team': 'las vegas aces'},
+        wa.normalize_player_name('Bench Player'): {'g': 2, 'pts_pg': 4.0,
+                                                   'team': 'las vegas aces'},
+        **{f'filler {i}': {'g': 6, 'pts_pg': 9.0, 'team': 'seattle storm'}
+           for i in range(5)},
+    },
+    'teams': {'las vegas aces': 82.0, 'seattle storm': 79.0},
+}
+_ritt = wa._implied_team_totals
+wa._implied_team_totals = lambda s, h, a: (84.0, 78.0)   # Aces home
+def model_event(line, over_px, under_px, extra_book=None):
+    bms = [{'key': 'fanduel', 'markets': [{'key': 'player_points', 'outcomes': [
+        {'description': "A'ja Wilson", 'name': 'Over', 'point': line, 'price': over_px},
+        {'description': "A'ja Wilson", 'name': 'Under', 'point': line, 'price': under_px},
+        {'description': 'Bench Player', 'name': 'Over', 'point': 5.5, 'price': -110},
+        {'description': 'Bench Player', 'name': 'Under', 'point': 5.5, 'price': -110},
+    ]}]}]
+    if extra_book:
+        bms.append(extra_book)
+    return [{'home_team': 'Las Vegas Aces', 'away_team': 'Seattle Storm',
+             'commence_time': '2026-08-22T00:00:00Z', 'id': 'evm1',
+             'bookmakers': bms}]
+try:
+    # share 22/82=0.268, mu = 0.268*84 = 22.54, sigma = 7.21
+    # line 19.5: p_over = 1-Phi(-0.421) = 0.663 vs -110 imp 0.524 -> +13.9%
+    mo = wa.model_prop_opportunities(model_event(19.5, -110, -110),
+                                     'basketball_wnba', 'WNBA Points')
+    wilson = [o for o in mo if 'Wilson' in o['player']]
+    check('model flags stale line vs single book',
+          len(wilson) == 1 and wilson[0]['recommendation'] == 'OVER 19.5'
+          and 10 < wilson[0]['edge'] < 15,
+          str([(o['player'], o['recommendation'], o['edge']) for o in mo]))
+    check('model card labeled as game-line derived',
+          wilson and 'game-line derived' in wilson[0]['label2_name'])
+    check('thin-form player never flagged',
+          all('Bench' not in o['player'] for o in mo))
+
+    # sanity guard: mu 22.5 vs line 14.5 -> gap 8 > 30% of line -> skip
+    mo2 = wa.model_prop_opportunities(model_event(14.5, +200, -280),
+                                      'basketball_wnba', 'WNBA Points')
+    check('model-vs-line sanity guard skips wild gaps',
+          all('Wilson' not in o['player'] for o in mo2), str(mo2))
+
+    # fairly-priced line -> no flag (p_model 0.545 at 21.5 vs imp 0.524 -> 2.1% < 4)
+    mo3 = wa.model_prop_opportunities(model_event(21.5, -110, -110),
+                                      'basketball_wnba', 'WNBA Points')
+    check('fair line stays quiet', all('Wilson' not in o['player'] for o in mo3),
+          str([(o.get('player'), o.get('edge')) for o in mo3]))
+
+    # non-CO book quote ignored
+    pin = {'key': 'pinnacle', 'markets': [{'key': 'player_points', 'outcomes': [
+        {'description': "A'ja Wilson", 'name': 'Over', 'point': 19.5, 'price': -150},
+        {'description': "A'ja Wilson", 'name': 'Under', 'point': 19.5, 'price': +120}]}]}
+    mo4 = wa.model_prop_opportunities(model_event(19.5, -110, -110, extra_book=pin),
+                                      'basketball_wnba', 'WNBA Points')
+    check('model prices only CO-bettable books',
+          all(o['book_key'] != 'pinnacle' for o in mo4))
+finally:
+    wa._implied_team_totals = _ritt
+
 print()
 if FAIL:
     print(f"❌ {len(FAIL)} failures: {FAIL}")
